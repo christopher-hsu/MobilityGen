@@ -282,11 +282,12 @@ class WheeledRobot(Robot):
         )
     
     def write_action(self, step_size: float):
-        self.robot.apply_wheel_actions(
-            self.controller.forward(
-                command=self.action.get_value()
-            )
-        )
+        
+        action = self.action.get_value()
+        
+        wheel_actions = self.controller.forward(command=action)
+        
+        self.robot.apply_wheel_actions(wheel_actions)
 
 
 class IsaacLabRobot(Robot):
@@ -354,7 +355,12 @@ class IsaacLabRobot(Robot):
 
     def set_pose_2d(self, pose):
         super().set_pose_2d(pose)
-        self.controller.initialize()
+        
+        try:
+            self.controller.initialize()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
 
 
 #=========================================================

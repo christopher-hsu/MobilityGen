@@ -72,7 +72,16 @@ class KeyboardTeleoperationScenario(Scenario):
 
         self.update_state()
 
+        # Explicitly update keyboard state to ensure responsiveness
+        self.keyboard.update_state()
+
         buttons = self.keyboard.buttons.get_value()
+
+
+
+        # Handle case where buttons is None (keyboard not initialized)
+        if buttons is None:
+            buttons = [0.0, 0.0, 0.0, 0.0]  # Default to no keys pressed
 
         w_val = float(buttons[0])
         a_val = float(buttons[1])
@@ -81,6 +90,8 @@ class KeyboardTeleoperationScenario(Scenario):
 
         linear_velocity = (w_val - s_val) * self.robot.keyboard_linear_velocity_gain
         angular_velocity = (a_val - d_val) * self.robot.keyboard_angular_velocity_gain
+
+
 
         self.robot.action.set_value(np.array([linear_velocity, angular_velocity]))
 

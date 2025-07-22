@@ -140,9 +140,23 @@ class Camera(Sensor):
 
     def update_state(self):
         if self._rgb_annotator is not None:
-            self.rgb_image.set_value(
-                self._rgb_annotator.get_data()[:, :, :3]
-            )
+            try:
+                rgb_data = self._rgb_annotator.get_data()
+                # Check if data is 3D (height, width, channels)
+                if len(rgb_data.shape) == 3:
+                    self.rgb_image.set_value(rgb_data[:, :, :3])
+                else:
+                    print(f"Warning: RGB data has unexpected shape: {rgb_data.shape}")
+                    # Try to reshape if it's 1D
+                    if len(rgb_data.shape) == 1:
+                        # This might be a flattened image, skip for now
+                        print(f"RGB data is 1D with shape {rgb_data.shape}, skipping")
+                        pass
+            except Exception as e:
+                print(f"Error processing RGB data: {e}")
+        else:
+            print(f"Warning: RGB annotator is None for camera at {self._prim_path}")
+        
         if self._segmentation_annotator is not None:
             data = self._segmentation_annotator.get_data()
             seg_image = data['data']
