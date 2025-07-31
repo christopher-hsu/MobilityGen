@@ -1,0 +1,75 @@
+{
+  "waypoints": [
+    {
+      "x": 5.0,
+      "y": 3.0,
+      "z": 0.0,
+      "qx": 0.0,
+      "qy": 0.0,
+      "qz": 0.0,
+      "qw": 1.0,
+      "description": "First waypoint"
+    },
+    {
+      "x": 8.0,
+      "y": 6.0,
+      "z": 0.0,
+      "qx": 0.0,
+      "qy": 0.0,
+      "qz": 0.0,
+      "qw": 1.0,
+      "description": "Second waypoint"
+    },
+    {
+      "x": 12.0,
+      "y": 4.0,
+      "z": 0.0,
+      "qx": 0.0,
+      "qy": 0.0,
+      "qz": 0.0,
+      "qw": 1.0,
+      "description": "Third waypoint"
+    },
+    {
+      "x": 15.0,
+      "y": 8.0,
+      "z": 0.0,
+      "qx": 0.0,
+      "qy": 0.0,
+      "qz": 0.0,
+      "qw": 1.0,
+      "description": "Fourth waypoint"
+    },
+    {
+      "x": 10.0,
+      "y": 10.0,
+      "z": 0.0,
+      "qx": 0.0,
+      "qy": 0.0,
+      "qz": 0.0,
+      "qw": 1.0,
+      "description": "Fifth waypoint"
+    },
+    {
+      "x": 6.0,
+      "y": 12.0,
+      "z": 0.0,
+      "qx": 0.0,
+      "qy": 0.0,
+      "qz": 0.0,
+      "qw": 1.0,
+      "description": "Sixth waypoint"
+    },
+    {
+      "x": 2.0,
+      "y": 8.0,
+      "z": 0.0,
+      "qx": 0.0,
+      "qy": 0.0,
+      "qz": 0.0,
+      "qw": 1.0,
+      "description": "Seventh waypoint"
+    }
+  ],
+  "description": "Example waypoints for testing robot navigation"
+}

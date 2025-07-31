@@ -11,3 +11,6 @@ _*/
 
 /app
 data
+
+#ignore scripts/config.py
+scripts/config.py
