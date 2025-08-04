@@ -15,6 +15,7 @@
 
 
 import os
+import numpy as np
 from typing import Tuple
 
 
@@ -226,3 +227,130 @@ class HawkCamera(Sensor):
         right_camera = Camera(os.path.join(prim_path, cls.right_camera_path), cls.resolution)
 
         return HawkCamera(left_camera, right_camera)
+
+
+class RealSense2Camera(Sensor):
+    """RealSense2 camera sensor implementation.
+    
+    This class provides a single camera interface for RealSense2 cameras,
+    supporting RGB and depth data. Unlike HawkCamera which is stereo,
+    RealSense2Camera provides a single camera with both RGB and depth capabilities.
+    
+    Note: Since the RealSense D455 USD asset is not accessible, this implementation
+    uses the Hawk camera asset but only uses one camera to simulate RealSense behavior.
+    """
+
+    # Use Hawk camera asset as fallback since RealSense D455 USD is not accessible
+    usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Sensors/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
+    resolution: Tuple[int, int] = (640, 480)
+    camera_path: str = "left/camera_left"  # Use only the left camera to simulate single camera
+    
+    # RealSense D455 camera intrinsics (typical values)
+    # These can be calibrated for your specific camera
+    focal_length_mm: float = 1.93  # Focal length in mm
+    sensor_width_mm: float = 3.68  # Sensor width in mm
+    sensor_height_mm: float = 2.76  # Sensor height in mm
+    fx: float = 386.0  # Focal length in pixels (x)
+    fy: float = 386.0  # Focal length in pixels (y)
+    cx: float = 320.0  # Principal point x
+    cy: float = 240.0  # Principal point y
+
+    def __init__(self, camera: Camera):
+        self.camera = camera
+        
+        # Initialize buffers to match the interface expected by robots
+        # These will be forwarded from the underlying camera
+        self.rgb_image = Buffer(tags=["rgb"])
+        self.depth_image = Buffer(tags=["depth"])
+        self.segmentation_image = Buffer(tags=["segmentation"])
+        self.segmentation_info = Buffer()
+        self.instance_id_segmentation_image = Buffer(tags=["segmentation"])
+        self.instance_id_segmentation_info = Buffer()
+        self.normals_image = Buffer(tags=['normals'])
+        self.position = Buffer()
+        self.orientation = Buffer()
+    
+    @classmethod
+    def get_realsense_d455_intrinsics(cls) -> dict:
+        """Get the camera intrinsics for RealSense D455.
+        
+        Returns:
+            dict: Dictionary containing camera intrinsics including:
+                - fx, fy: Focal lengths in pixels
+                - cx, cy: Principal point coordinates
+                - width, height: Image dimensions
+                - focal_length_mm: Focal length in mm
+                - sensor_width_mm, sensor_height_mm: Sensor dimensions
+        """
+        return {
+            'fx': cls.fx,
+            'fy': cls.fy,
+            'cx': cls.cx,
+            'cy': cls.cy,
+            'width': cls.resolution[0],
+            'height': cls.resolution[1],
+            'focal_length_mm': cls.focal_length_mm,
+            'sensor_width_mm': cls.sensor_width_mm,
+            'sensor_height_mm': cls.sensor_height_mm
+        }
+    
+    @classmethod
+    def get_realsense_d455_intrinsics_matrix(cls) -> np.ndarray:
+        """Get the camera intrinsics matrix for RealSense D455.
+        
+        Returns:
+            np.ndarray: 3x3 camera intrinsics matrix in the format:
+                [[fx, 0,  cx],
+                 [0,  fy, cy],
+                 [0,  0,  1 ]]
+        """
+        import numpy as np
+        return np.array([
+            [cls.fx, 0, cls.cx],
+            [0, cls.fy, cls.cy],
+            [0, 0, 1]
+        ])
+    
+    @classmethod
+    def build(cls, prim_path: str) -> "RealSense2Camera":
+        
+        stage = get_stage()
+
+        stage_add_usd_ref(
+            stage=stage,
+            path=prim_path,
+            usd_path=cls.usd_url
+        )
+
+        return cls.attach(prim_path)
+    
+    @classmethod
+    def attach(cls, prim_path: str) -> "RealSense2Camera":
+        
+        camera = Camera(os.path.join(prim_path, cls.camera_path), cls.resolution)
+        
+        # Enable both RGB and depth rendering for RealSense2
+        camera.enable_rgb_rendering()
+        camera.enable_depth_rendering()
+
+        return RealSense2Camera(camera)
+    
+    def update_state(self):
+        # Update the underlying camera state
+        self.camera.update_state()
+        
+        # Forward the camera's buffer values to this sensor's interface
+        # This allows the RealSense2Camera to be used as a drop-in replacement
+        # for HawkCamera in robot configurations
+        # Simply forward the values - the underlying camera will handle the logic
+        self.rgb_image.set_value(self.camera.rgb_image.get_value())
+        self.depth_image.set_value(self.camera.depth_image.get_value())
+        self.segmentation_image.set_value(self.camera.segmentation_image.get_value())
+        self.segmentation_info.set_value(self.camera.segmentation_info.get_value())
+        self.instance_id_segmentation_image.set_value(self.camera.instance_id_segmentation_image.get_value())
+        self.instance_id_segmentation_info.set_value(self.camera.instance_id_segmentation_info.get_value())
+        self.normals_image.set_value(self.camera.normals_image.get_value())
+        self.position.set_value(self.camera.position.get_value())
+        self.orientation.set_value(self.camera.orientation.get_value())
+        
+        super().update_state()

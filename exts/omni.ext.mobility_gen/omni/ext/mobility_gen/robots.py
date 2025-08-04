@@ -32,7 +32,7 @@ import isaacsim.core.utils.numpy.rotations as rot_utils
 
 # Extension imports
 from omni.ext.mobility_gen.common import Buffer, Module
-from omni.ext.mobility_gen.sensors import Sensor, HawkCamera
+from omni.ext.mobility_gen.sensors import Sensor, HawkCamera, RealSense2Camera
 from omni.ext.mobility_gen.utils.global_utils import get_stage, get_world
 from omni.ext.mobility_gen.utils.stage_utils import stage_get_prim, stage_add_camera, stage_add_usd_ref
 from omni.ext.mobility_gen.utils.prim_utils import prim_rotate_x, prim_rotate_y, prim_rotate_z, prim_translate
@@ -540,6 +540,65 @@ class SpotRobot(IsaacLabRobot):
     front_camera_rotation = (180, 180, 180)
     front_camera_translation = (0.44, 0.075, 0.01)
     front_camera_type = HawkCamera
+
+    keyboard_linear_velocity_gain: float = 1.0
+    keyboard_angular_velocity_gain: float = 1.0
+
+    gamepad_linear_velocity_gain: float = 1.0
+    gamepad_angular_velocity_gain: float = 1.0
+
+    random_action_linear_velocity_range: Tuple[float, float] = (-0.3, 1.0)
+    random_action_angular_velocity_range: Tuple[float, float] = (-0.75, 0.75)
+    random_action_linear_acceleration_std: float = 5.0
+    random_action_angular_acceleration_std: float = 5.0
+    random_action_grid_pose_sampler_grid_size: float = 5.0
+    
+    path_following_speed: float = 1.0
+    path_following_angular_gain: float = 1.0
+    path_following_stop_distance_threshold: float = 0.5
+    path_following_forward_angle_threshold = math.pi / 4
+    path_following_target_point_offset_meters: float = 1.0
+
+    usd_url = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Robots/BostonDynamics/spot/spot.usd"
+    articulation_path = "/"
+    controller_z_offset: float = 0.7
+
+    @classmethod
+    def build_policy(cls, prim_path: str):
+        return SpotFlatTerrainPolicy(
+            prim_path=prim_path,
+            position=np.array([0., 0., cls.controller_z_offset])
+        )
+
+
+@ROBOTS.register()
+class SpotRobotRealSense(IsaacLabRobot):
+    """SpotRobot variant that uses RealSense2 camera instead of HawkCamera.
+    
+    This variant provides the same Spot robot functionality but with RealSense2
+    camera data instead of the stereo HawkCamera. The RealSense2 provides
+    both RGB and depth data from a single camera.
+    """
+
+    physics_dt: float = 0.005
+    z_offset: float = 0.7
+
+    chase_camera_base_path = "body"
+    chase_camera_x_offset: float = -1.5
+    chase_camera_z_offset: float = 0.8
+    chase_camera_tilt_angle: float = 60.
+
+    occupancy_map_radius: float = 1.0
+    occupancy_map_z_min: float = 0.1
+    occupancy_map_z_max: float = 0.62
+    occupancy_map_cell_size: float = 0.05
+    occupancy_map_collision_radius: float = 0.5
+
+    # Updated camera configuration for RealSense2
+    front_camera_base_path = "body/front_camera"
+    front_camera_rotation = (180, 180, 180)
+    front_camera_translation = (0.44, 0.075, 0.01)
+    front_camera_type = RealSense2Camera
 
     keyboard_linear_velocity_gain: float = 1.0
     keyboard_angular_velocity_gain: float = 1.0
