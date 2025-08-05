@@ -1,0 +1,161 @@
+# Camera Intrinsics Configuration
+# This file contains camera intrinsics parameters for different camera types
+# Based on Isaac Sim USD Assets: https://docs.isaacsim.omniverse.nvidia.com/4.5.0/assets/usd_assets_sensors.html
+
+# Leopard Imaging Hawk Stereo Camera
+# Real sensor dimensions: 1/2.9" sensor (6.17mm x 4.55mm)
+# Resolution: 960x600
+hawk_camera:
+  left:
+    width: 960
+    height: 600
+    fx: 612.4178466796875
+    fy: 612.362060546875
+    cx: 309.72296142578125
+    cy: 245.35870361328125
+    # Real sensor dimensions (mm) - 1/2.9" sensor
+    sensor_width_mm: 6.17
+    sensor_height_mm: 4.55
+    # Distortion coefficients (optional)
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  
+  right:
+    width: 1280
+    height: 720
+    fx: 927.17
+    fy: 927.37
+    cx: 636.85
+    cy: 355.56
+    # Real sensor dimensions (mm) - 1/2.5" sensor
+    sensor_width_mm: 5.76
+    sensor_height_mm: 4.29
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Intel RealSense D455
+# Real sensor dimensions: 1/2.5" sensor (5.76mm x 4.29mm)
+# Resolution: 1280x720 (RGB), 1280x720 (Depth)
+realsense_camera:
+  left:
+    width: 1280
+    height: 720
+    fx: 927.17
+    fy: 927.37
+    cx: 636.85
+    cy: 355.56
+    # Real sensor dimensions (mm) - 1/2.5" sensor
+    sensor_width_mm: 5.76
+    sensor_height_mm: 4.29
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  
+  right:
+    width: 1280
+    height: 720
+    fx: 927.17
+    fy: 927.37
+    cx: 636.85
+    cy: 355.56
+    # Real sensor dimensions (mm) - 1/2.5" sensor
+    sensor_width_mm: 5.76
+    sensor_height_mm: 4.29
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Leopard Imaging Owl Fisheye Camera
+# Real sensor dimensions: 1/2.9" sensor (6.17mm x 4.55mm)
+# Resolution: 1920x1080
+owl_camera:
+  width: 1920
+  height: 1080
+  fx: 1224.84
+  fy: 1224.72
+  cx: 960.0
+  cy: 540.0
+  # Real sensor dimensions (mm) - 1/2.9" sensor
+  sensor_width_mm: 6.17
+  sensor_height_mm: 4.55
+  distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Orbbec Gemini 2
+# Real sensor dimensions: 1/2.5" sensor (5.76mm x 4.29mm)
+# Resolution: 1920x1080
+orbbec_gemini2:
+  width: 1920
+  height: 1080
+  fx: 1380.0
+  fy: 1380.0
+  cx: 960.0
+  cy: 540.0
+  # Real sensor dimensions (mm) - 1/2.5" sensor
+  sensor_width_mm: 5.76
+  sensor_height_mm: 4.29
+  distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Stereolabs ZED X
+# Real sensor dimensions: 1/2.5" sensor (5.76mm x 4.29mm)
+# Resolution: 2208x1242
+zed_camera:
+  left:
+    width: 2208
+    height: 1242
+    fx: 1400.0
+    fy: 1400.0
+    cx: 1104.0
+    cy: 621.0
+    # Real sensor dimensions (mm) - 1/2.5" sensor
+    sensor_width_mm: 5.76
+    sensor_height_mm: 4.29
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  
+  right:
+    width: 2208
+    height: 1242
+    fx: 1400.0
+    fy: 1400.0
+    cx: 1104.0
+    cy: 621.0
+    # Real sensor dimensions (mm) - 1/2.5" sensor
+    sensor_width_mm: 5.76
+    sensor_height_mm: 4.29
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Sensing SG2-AR0233C Camera
+# Real sensor dimensions: 1/2.7" sensor (5.76mm x 4.29mm)
+# Resolution: 1920x1080
+sensing_sg2:
+  width: 1920
+  height: 1080
+  fx: 1200.0
+  fy: 1200.0
+  cx: 960.0
+  cy: 540.0
+  # Real sensor dimensions (mm) - 1/2.7" sensor
+  sensor_width_mm: 5.76
+  sensor_height_mm: 4.29
+  distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Single Camera (mono camera) - Generic
+# Default sensor dimensions: 1/3" sensor (4.8mm x 3.6mm)
+single_camera:
+  width: 640
+  height: 480
+  fx: 612.4178466796875
+  fy: 612.362060546875
+  cx: 309.72296142578125
+  cy: 245.35870361328125
+  # Real sensor dimensions (mm) - 1/3" sensor
+  sensor_width_mm: 4.8
+  sensor_height_mm: 3.6
+  distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# Default camera intrinsics (used as fallback)
+# Generic sensor dimensions
+default:
+  width: 640
+  height: 480
+  fx: 500.0
+  fy: 500.0
+  cx: 320.0
+  cy: 240.0
+  # Generic sensor dimensions (mm)
+  sensor_width_mm: 4.8
+  sensor_height_mm: 3.6
+  distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] 

@@ -1,0 +1,1 @@
+# Camera Config package for MobilityGen extension 
