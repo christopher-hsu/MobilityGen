@@ -85,11 +85,18 @@ try:
     # Import TF2 modules for transform publishing
     try:
         from tf2_ros import TransformBroadcaster
+        try:
+            from tf2_msgs.msg import TFMessage
+            TF2_MSG_AVAILABLE = True
+        except ImportError:
+            TF2_MSG_AVAILABLE = False
+            print("⚠ TF2 messages not available, TF bag recording disabled")
         TF2_AVAILABLE = True
         print("✓ TF2 imports successful")
     except ImportError as e:
         print(f"✗ TF2 import failed: {e}")
         TF2_AVAILABLE = False
+        TF2_MSG_AVAILABLE = False
     
     print("✓ All ROS2 imports successful")
     
@@ -155,7 +162,21 @@ try:
         
         def _init_bag_database(self):
             """Initialize the SQLite database for the ROS2 bag with thread safety."""
-            os.makedirs(os.path.dirname(self.bag_path), exist_ok=True)
+            # Create the bag directory structure
+            bag_dir = os.path.dirname(self.bag_path)
+            if not bag_dir:
+                bag_dir = "."
+            
+            # Create a unique bag directory name based on timestamp
+            timestamp = int(time.time())
+            bag_name = f"mobility_gen_ros2_{timestamp}"
+            self.bag_dir = os.path.join(bag_dir, bag_name)
+            
+            # Create the bag directory
+            os.makedirs(self.bag_dir, exist_ok=True)
+            
+            # Create the database file inside the bag directory
+            self.db_path = os.path.join(self.bag_dir, f"{bag_name}.db3")
             
             # Create response queue for topic ID lookups
             self.response_queue = queue.Queue()
@@ -169,13 +190,13 @@ try:
             while not hasattr(self, '_db_ready') or not self._db_ready:
                 time.sleep(0.01)
             
-            print("✓ Bag database initialized")
+            print(f"✓ Bag database initialized at: {self.bag_dir}")
         
         def _db_worker(self):
             """Database worker thread that handles all database operations."""
             try:
                 # Create database connection in this thread
-                self.db_conn = sqlite3.connect(self.bag_path)
+                self.db_conn = sqlite3.connect(self.db_path)
                 self.db_cursor = self.db_conn.cursor()
                 
                 # Create tables for ROS2 bag format
@@ -228,12 +249,79 @@ try:
                         print(f"Error in database worker: {e}")
                         traceback.print_exc()
                 
+                # Create metadata.yaml file when closing
+                if hasattr(self, 'db_conn') and self.db_conn:
+                    self._create_metadata_yaml()
+                
             except Exception as e:
                 print(f"Error initializing database worker: {e}")
                 traceback.print_exc()
             finally:
                 if hasattr(self, 'db_conn') and self.db_conn:
                     self.db_conn.close()
+        
+        def _create_metadata_yaml(self):
+            """Create the metadata.yaml file for the ROS2 bag."""
+            try:
+                # Get bag information from the database
+                self.db_cursor.execute("SELECT COUNT(*) FROM messages")
+                message_count = self.db_cursor.fetchone()[0]
+                
+                self.db_cursor.execute("SELECT MIN(timestamp), MAX(timestamp) FROM messages")
+                time_result = self.db_cursor.fetchone()
+                min_time = time_result[0] if time_result[0] else 0
+                max_time = time_result[1] if time_result[1] else 0
+                
+                # Get topics with message counts
+                self.db_cursor.execute("""
+                    SELECT name, type, COUNT(*) as msg_count 
+                    FROM topics 
+                    JOIN messages ON topics.id = messages.topic_id 
+                    GROUP BY topics.id, name, type
+                """)
+                topics_info = self.db_cursor.fetchall()
+                
+                # Create topics_with_message_count list
+                topics_with_message_count = []
+                for topic_name, topic_type, msg_count in topics_info:
+                    topics_with_message_count.append({
+                        'topic_metadata': {
+                            'name': topic_name,
+                            'type': topic_type,
+                            'serialization_format': 'cdr',
+                            'offered_qos_profiles': ''
+                        },
+                        'message_count': msg_count
+                    })
+                
+                # Create metadata dictionary
+                metadata = {
+                    'rosbag2_bagfile_information': {
+                        'version': 4,
+                        'storage_identifier': 'sqlite3',
+                        'relative_file_paths': [os.path.basename(self.db_path)],
+                        'duration': {
+                            'nanoseconds': max_time - min_time if max_time and min_time else 0
+                        },
+                        'starting_time': {
+                            'nanoseconds_since_epoch': min_time if min_time else 0
+                        },
+                        'message_count': message_count,
+                        'topics_with_message_count': topics_with_message_count
+                    }
+                }
+                
+                # Write metadata.yaml file
+                metadata_path = os.path.join(self.bag_dir, 'metadata.yaml')
+                import yaml
+                with open(metadata_path, 'w') as f:
+                    yaml.dump(metadata, f)
+                
+                print(f"✓ Created metadata.yaml at: {metadata_path}")
+                
+            except Exception as e:
+                print(f"Error creating metadata.yaml: {e}")
+                traceback.print_exc()
         
         def _db_get_or_create_topic_id(self, topic_name: str, msg_type: str) -> int:
             """Get or create a topic ID (called from database thread)."""
@@ -349,8 +437,21 @@ try:
                 transform.transform.rotation.z = float(orientation[2])
                 transform.transform.rotation.w = float(orientation[3])
                 
-                # Publish the transform
+                # Publish the transform via TF2
                 self.tf_broadcaster.sendTransform(transform)
+                
+                # Also record the transform in the bag if bag recording is enabled
+                if self.mode in ["Bag Only", "Stream + Bag"] and hasattr(self, 'db_cursor') and TF2_MSG_AVAILABLE:
+                    try:
+                        # Create TFMessage for bag recording
+                        tf_message = TFMessage()
+                        tf_message.transforms = [transform]
+                        
+                        # Record to bag using the /tf topic
+                        self._write_to_bag("/tf", tf_message, "tf2_msgs/msg/TFMessage")
+                    except Exception as e:
+                        print(f"Error recording transform to bag: {e}")
+                        traceback.print_exc()
                 
             except Exception as e:
                 print(f"Error publishing robot transform: {e}")
@@ -835,6 +936,13 @@ try:
                 # Print final statistics
                 stats = self.get_queue_stats()
                 print(f"Final queue stats: {stats['total_messages']} messages, {stats['dropped_messages']} dropped ({stats['drop_rate']:.1f}%)")
+                
+                # Create metadata.yaml if bag was created
+                if hasattr(self, 'bag_dir') and os.path.exists(self.bag_dir):
+                    print(f"✓ ROS2 bag created at: {self.bag_dir}")
+                    print(f"  - Database: {self.db_path}")
+                    print(f"  - Metadata: {os.path.join(self.bag_dir, 'metadata.yaml')}")
+                    print(f"  - This bag can be converted to ROS1 using: rosbags-convert --src {self.bag_dir} --dst output.bag --src-typestore ros2_humble")
             
             super().destroy_node()
     
