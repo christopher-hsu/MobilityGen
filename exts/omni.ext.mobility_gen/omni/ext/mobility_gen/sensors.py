@@ -16,15 +16,16 @@
 
 import os
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Optional
 
 
 import omni.replicator.core as rep
 from isaacsim.core.prims import SingleXFormPrim as XFormPrim
+from pxr import UsdGeom
 
 
 from omni.ext.mobility_gen.utils.global_utils import get_stage
-from omni.ext.mobility_gen.utils.stage_utils import stage_add_usd_ref
+from omni.ext.mobility_gen.utils.stage_utils import stage_add_usd_ref, stage_get_prim
 from omni.ext.mobility_gen.common import Module, Buffer
 
 
@@ -53,6 +54,10 @@ class Camera(Sensor):
         self._normals_annotator = None
         self._depth_annotator = None
         self._xform_prim = XFormPrim(self._prim_path)
+        
+        # Store the USD prim reference for accessing camera intrinsics
+        stage = get_stage()
+        self._prim = stage_get_prim(stage, prim_path)
 
         self.rgb_image = Buffer(tags=["rgb"])
         self.segmentation_image = Buffer(tags=["segmentation"])
@@ -63,6 +68,17 @@ class Camera(Sensor):
         self.normals_image = Buffer(tags=['normals'])
         self.position = Buffer()
         self.orientation = Buffer()
+        self.intrinsics = Buffer(tags=["intrinsics"])
+
+    @property
+    def prim(self):
+        """Get the USD prim reference for this camera."""
+        return self._prim
+    
+    @property
+    def resolution(self):
+        """Get the camera resolution."""
+        return self._resolution
 
     def enable_rendering(self):
         
@@ -185,7 +201,101 @@ class Camera(Sensor):
         self.position.set_value(position)
         self.orientation.set_value(orientation)
         
+        # Calculate and store camera intrinsics
+        try:
+            intrinsics = self._calculate_intrinsics()
+            if intrinsics is not None:
+                self.intrinsics.set_value(intrinsics)
+        except Exception as e:
+            print(f"Warning: Could not calculate intrinsics for camera at {self._prim_path}: {e}")
+        
         super().update_state()
+
+    def _calculate_intrinsics(self) -> Optional[Tuple[float, float, float, float]]:
+        """
+        Calculate camera intrinsics from USD prim attributes.
+        
+        Returns:
+            Optional[Tuple[float, float, float, float]]: (fx, fy, cx, cy) or None if not available
+        """
+        try:
+            # Check if prim is valid
+            if not self._prim.IsValid():
+                print(f"Warning: Camera prim at {self._prim_path} is not valid")
+                return None
+            
+            # Find the actual camera prim with camera attributes
+            camera_prim = self._find_camera_prim()
+            if camera_prim is None:
+                print(f"Warning: No camera prim found in hierarchy at {self._prim_path}")
+                return None
+            
+            # Get the USD camera attributes from the found camera prim
+            focal_length_attr = camera_prim.GetAttribute("focalLength")
+            horizontal_aperture_attr = camera_prim.GetAttribute("horizontalAperture")
+            vertical_aperture_attr = camera_prim.GetAttribute("verticalAperture")
+
+            # Check if attributes have values
+            if not focal_length_attr.HasValue():
+                print(f"Warning: focalLength attribute not found for camera at {camera_prim.GetPath()}")
+                return None
+            if not horizontal_aperture_attr.HasValue():
+                print(f"Warning: horizontalAperture attribute not found for camera at {camera_prim.GetPath()}")
+                return None
+            if not vertical_aperture_attr.HasValue():
+                print(f"Warning: verticalAperture attribute not found for camera at {camera_prim.GetPath()}")
+                return None
+
+            focal_length = focal_length_attr.Get()
+            horizontal_aperture = horizontal_aperture_attr.Get()
+            vertical_aperture = vertical_aperture_attr.Get()
+
+            # Calculate the intrinsic matrix values
+            image_width, image_height = self._resolution
+            fx = (image_width * focal_length) / horizontal_aperture
+            fy = (image_height * focal_length) / vertical_aperture
+            cx = image_width / 2.0
+            cy = image_height / 2.0
+
+            return (fx, fy, cx, cy)
+            
+        except Exception as e:
+            print(f"Error calculating intrinsics for camera at {self._prim_path}: {e}")
+            return None
+
+    def _find_camera_prim(self) -> Optional[object]:
+        """
+        Find the actual camera prim with camera attributes in the hierarchy.
+        
+        Returns:
+            Optional[object]: The camera prim with camera attributes, or None if not found
+        """
+        try:
+            # First check if the current prim is a camera
+            if self._prim.GetTypeName() == "Camera":
+                return self._prim
+            
+            # Search children for camera prims
+            for child in self._prim.GetChildren():
+                if child.GetTypeName() == "Camera":
+                    return child
+            
+            # Search deeper in the hierarchy
+            def search_camera_prim(prim):
+                if prim.GetTypeName() == "Camera":
+                    return prim
+                for child in prim.GetChildren():
+                    result = search_camera_prim(child)
+                    if result is not None:
+                        return result
+                return None
+            
+            camera_prim = search_camera_prim(self._prim)
+            return camera_prim
+            
+        except Exception as e:
+            print(f"Error searching for camera prim: {e}")
+            return None
 
 
 #=========================================================
@@ -201,24 +311,40 @@ class HawkCamera(Sensor):
     right_camera_path: str = "right/camera_right"
 
     def __init__(self, 
-            left: Camera, 
-            right: Camera
+            left: Camera = None, 
+            right: Camera = None,
+            single_camera: Camera = None
         ):
         self.left = left
         self.right = right
+        self.single_camera = single_camera
     
     @classmethod
     def build(cls, prim_path: str) -> "HawkCamera":
         
         stage = get_stage()
 
+        # First, add the USD reference to get the camera prims
         stage_add_usd_ref(
             stage=stage,
             path=prim_path,
             usd_path=cls.usd_url
         )
 
-        return cls.attach(prim_path)
+        # Check if this is a stereo camera setup (has left/right paths)
+        left_path = os.path.join(prim_path, cls.left_camera_path)
+        right_path = os.path.join(prim_path, cls.right_camera_path)
+        
+        # Check if both left and right cameras exist
+        left_prim = stage.GetPrimAtPath(left_path)
+        right_prim = stage.GetPrimAtPath(right_path)
+        
+        if left_prim.IsValid() and right_prim.IsValid():
+            # This is a stereo camera setup
+            return cls.attach(prim_path)
+        else:
+            # This is a single camera setup
+            return cls.attach_single(prim_path)
     
     @classmethod
     def attach(cls, prim_path: str) -> "HawkCamera":
@@ -226,131 +352,22 @@ class HawkCamera(Sensor):
         left_camera = Camera(os.path.join(prim_path, cls.left_camera_path), cls.resolution)
         right_camera = Camera(os.path.join(prim_path, cls.right_camera_path), cls.resolution)
 
-        return HawkCamera(left_camera, right_camera)
-
-
-class RealSense2Camera(Sensor):
-    """RealSense2 camera sensor implementation.
-    
-    This class provides a single camera interface for RealSense2 cameras,
-    supporting RGB and depth data. Unlike HawkCamera which is stereo,
-    RealSense2Camera provides a single camera with both RGB and depth capabilities.
-    
-    Note: Since the RealSense D455 USD asset is not accessible, this implementation
-    uses the Hawk camera asset but only uses one camera to simulate RealSense behavior.
-    """
-
-    # Use Hawk camera asset as fallback since RealSense D455 USD is not accessible
-    usd_url: str = "http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Sensors/LeopardImaging/Hawk/hawk_v1.1_nominal.usd"
-    resolution: Tuple[int, int] = (640, 480)
-    camera_path: str = "left/camera_left"  # Use only the left camera to simulate single camera
-    
-    # RealSense D455 camera intrinsics (typical values)
-    # These can be calibrated for your specific camera
-    focal_length_mm: float = 1.93  # Focal length in mm
-    sensor_width_mm: float = 3.68  # Sensor width in mm
-    sensor_height_mm: float = 2.76  # Sensor height in mm
-    fx: float = 386.0  # Focal length in pixels (x)
-    fy: float = 386.0  # Focal length in pixels (y)
-    cx: float = 320.0  # Principal point x
-    cy: float = 240.0  # Principal point y
-
-    def __init__(self, camera: Camera):
-        self.camera = camera
-        
-        # Initialize buffers to match the interface expected by robots
-        # These will be forwarded from the underlying camera
-        self.rgb_image = Buffer(tags=["rgb"])
-        self.depth_image = Buffer(tags=["depth"])
-        self.segmentation_image = Buffer(tags=["segmentation"])
-        self.segmentation_info = Buffer()
-        self.instance_id_segmentation_image = Buffer(tags=["segmentation"])
-        self.instance_id_segmentation_info = Buffer()
-        self.normals_image = Buffer(tags=['normals'])
-        self.position = Buffer()
-        self.orientation = Buffer()
+        return HawkCamera(left=left_camera, right=right_camera)
     
     @classmethod
-    def get_realsense_d455_intrinsics(cls) -> dict:
-        """Get the camera intrinsics for RealSense D455.
-        
-        Returns:
-            dict: Dictionary containing camera intrinsics including:
-                - fx, fy: Focal lengths in pixels
-                - cx, cy: Principal point coordinates
-                - width, height: Image dimensions
-                - focal_length_mm: Focal length in mm
-                - sensor_width_mm, sensor_height_mm: Sensor dimensions
-        """
-        return {
-            'fx': cls.fx,
-            'fy': cls.fy,
-            'cx': cls.cx,
-            'cy': cls.cy,
-            'width': cls.resolution[0],
-            'height': cls.resolution[1],
-            'focal_length_mm': cls.focal_length_mm,
-            'sensor_width_mm': cls.sensor_width_mm,
-            'sensor_height_mm': cls.sensor_height_mm
-        }
-    
-    @classmethod
-    def get_realsense_d455_intrinsics_matrix(cls) -> np.ndarray:
-        """Get the camera intrinsics matrix for RealSense D455.
-        
-        Returns:
-            np.ndarray: 3x3 camera intrinsics matrix in the format:
-                [[fx, 0,  cx],
-                 [0,  fy, cy],
-                 [0,  0,  1 ]]
-        """
-        import numpy as np
-        return np.array([
-            [cls.fx, 0, cls.cx],
-            [0, cls.fy, cls.cy],
-            [0, 0, 1]
-        ])
-    
-    @classmethod
-    def build(cls, prim_path: str) -> "RealSense2Camera":
-        
-        stage = get_stage()
+    def attach_single(cls, prim_path: str) -> "HawkCamera":
+        """Attach to a single camera (for robots like Spot that use HawkCamera as single camera)"""
+        single_camera = Camera(prim_path, cls.resolution)
+        return HawkCamera(single_camera=single_camera)
 
-        stage_add_usd_ref(
-            stage=stage,
-            path=prim_path,
-            usd_path=cls.usd_url
-        )
-
-        return cls.attach(prim_path)
-    
-    @classmethod
-    def attach(cls, prim_path: str) -> "RealSense2Camera":
-        
-        camera = Camera(os.path.join(prim_path, cls.camera_path), cls.resolution)
-        
-        # Enable both RGB and depth rendering for RealSense2
-        camera.enable_rgb_rendering()
-        camera.enable_depth_rendering()
-
-        return RealSense2Camera(camera)
-    
     def update_state(self):
-        # Update the underlying camera state
-        self.camera.update_state()
-        
-        # Forward the camera's buffer values to this sensor's interface
-        # This allows the RealSense2Camera to be used as a drop-in replacement
-        # for HawkCamera in robot configurations
-        # Simply forward the values - the underlying camera will handle the logic
-        self.rgb_image.set_value(self.camera.rgb_image.get_value())
-        self.depth_image.set_value(self.camera.depth_image.get_value())
-        self.segmentation_image.set_value(self.camera.segmentation_image.get_value())
-        self.segmentation_info.set_value(self.camera.segmentation_info.get_value())
-        self.instance_id_segmentation_image.set_value(self.camera.instance_id_segmentation_image.get_value())
-        self.instance_id_segmentation_info.set_value(self.camera.instance_id_segmentation_info.get_value())
-        self.normals_image.set_value(self.camera.normals_image.get_value())
-        self.position.set_value(self.camera.position.get_value())
-        self.orientation.set_value(self.camera.orientation.get_value())
+        """Update the state of the HawkCamera, including intrinsics for all cameras."""
+        # Update individual cameras
+        if self.left is not None:
+            self.left.update_state()
+        if self.right is not None:
+            self.right.update_state()
+        if self.single_camera is not None:
+            self.single_camera.update_state()
         
         super().update_state()

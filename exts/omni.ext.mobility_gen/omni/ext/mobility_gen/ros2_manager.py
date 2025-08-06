@@ -75,7 +75,7 @@ try:
     from rclpy.node import Node
     from rclpy.serialization import serialize_message
     from std_msgs.msg import String, Header, Float64MultiArray
-    from sensor_msgs.msg import Image
+    from sensor_msgs.msg import Image, CameraInfo
     from geometry_msgs.msg import PoseStamped, TwistStamped
     from cv_bridge import CvBridge
     
@@ -86,9 +86,7 @@ try:
         
         def __init__(self, namespace: str = "/mobility_gen", enable_compression: bool = False, 
                      bag_path: str = None, mode: str = "Stream + Bag"):
-            print(f"DEBUG: Creating ROS2 node for namespace: {namespace}")
             super().__init__(f"mobility_gen_writer_{int(time.time())}")
-            print(f"DEBUG: ROS2 node created successfully")
             
             self.namespace = namespace
             self.enable_compression = enable_compression
@@ -106,7 +104,6 @@ try:
             self.camera_publish_frequency = 10
             self.last_camera_publish_step = -1
             
-            print(f"DEBUG: Creating ROS2Writer...")
             self._init_publishers()
             print(f"✓ Publishers initialized")
             
@@ -114,10 +111,7 @@ try:
                 self._init_bag_database()
                 print(f"✓ Bag database initialized")
             
-            print(f"✓ ROS2 Writer initialized with namespace: {self.namespace}")
-            print(f"✓ Mode: {self.mode}")
-            print(f"✓ ROS2 processing frequency: {60/self.ros2_publish_frequency:.1f}Hz")
-            print(f"✓ Camera publishing frequency: {60/self.camera_publish_frequency:.1f}Hz")
+
         
         def _init_bag_database(self):
             """Initialize the SQLite database for the ROS2 bag."""
@@ -162,6 +156,7 @@ try:
             self.segmentation_publishers = {}
             self.depth_publishers = {}
             self.normals_publishers = {}
+            self.camera_info_publishers = {}
             
             print("✓ Publishers initialized")
         
@@ -235,9 +230,6 @@ try:
             
             topic_name = f"{self.namespace}/common_state"
             self._publish_message(msg, topic_name, "std_msgs/msg/String", self.common_state_pub)
-            
-            if step % 1000 == 0:
-                print(f"✓ Published common state (step {step}) - Mode: {self.mode}")
         
         def write_common_state_data(self, state_dict: dict, step: int):
             """Extract and publish all data from state to ROS2 topics."""
@@ -296,6 +288,12 @@ try:
                                 if camera_name not in camera_data:
                                     camera_data[camera_name] = {}
                                 camera_data[camera_name]['instance_id_segmentation_info'] = value
+                            elif 'intrinsics' in key:
+                                # Handle camera intrinsics
+                                camera_name = key.replace('.intrinsics', '')
+                                if camera_name not in camera_data:
+                                    camera_data[camera_name] = {}
+                                camera_data[camera_name]['intrinsics'] = value
                         else:
                             robot_data[key] = value
                     elif key.startswith('keyboard.'):
@@ -417,6 +415,32 @@ try:
                         except Exception as e:
                             print(f"Error publishing camera pose for {camera_name}: {e}")
                             traceback.print_exc()
+                    
+                    # Publish camera intrinsics (if available)
+                    if 'intrinsics' in camera_data_dict:
+                        try:
+                            intrinsics = self._extract_camera_intrinsics(camera_name, camera_data_dict)
+                            if intrinsics is not None:
+                                # Get resolution from camera data or use default
+                                resolution = camera_data_dict.get('resolution', (960, 600))  # Default HawkCamera resolution
+                                
+                                camera_info_msg = self._create_camera_info_message(camera_name, intrinsics, resolution)
+                                sanitized_name = self._sanitize_topic_name(camera_name)
+                                topic_name = f"{self.namespace}/camera/{sanitized_name}/camera_info"
+                                
+                                if topic_name not in self.camera_info_publishers:
+                                    self.camera_info_publishers[topic_name] = self.create_publisher(
+                                        CameraInfo, topic_name, 10
+                                    )
+                                self._publish_message(camera_info_msg, topic_name, "sensor_msgs/msg/CameraInfo", 
+                                                    self.camera_info_publishers[topic_name])
+                                
+                                if step % 1000 == 0:  # Log occasionally
+                                    pass
+                                
+                        except Exception as e:
+                            print(f"Error publishing camera intrinsics for {camera_name}: {e}")
+                            traceback.print_exc()
                 
                 # Publish images at throttled frequency
                 should_publish_images = (step - self.last_camera_publish_step) >= self.camera_publish_frequency
@@ -503,6 +527,78 @@ try:
             except Exception as e:
                 print(f"Error in _publish_camera_data_with_images: {e}")
                 traceback.print_exc()
+        
+        def _create_camera_info_message(self, camera_name: str, intrinsics: tuple, resolution: tuple) -> CameraInfo:
+            """
+            Create a CameraInfo message from camera intrinsics.
+            
+            Args:
+                camera_name (str): Name of the camera
+                intrinsics (tuple): (fx, fy, cx, cy) camera intrinsics
+                resolution (tuple): (width, height) camera resolution
+                
+            Returns:
+                CameraInfo: ROS2 CameraInfo message
+            """
+            fx, fy, cx, cy = intrinsics
+            width, height = resolution
+            
+            camera_info = CameraInfo()
+            camera_info.header = self._create_header()
+            camera_info.header.frame_id = f"{camera_name}_optical_frame"
+            
+            # Set camera matrix (3x3)
+            camera_info.k = [
+                fx, 0.0, cx,
+                0.0, fy, cy,
+                0.0, 0.0, 1.0
+            ]
+            
+            # Set distortion coefficients (assuming no distortion for now)
+            camera_info.d = [0.0, 0.0, 0.0, 0.0, 0.0]
+            
+            # Set projection matrix (3x4)
+            camera_info.p = [
+                fx, 0.0, cx, 0.0,
+                0.0, fy, cy, 0.0,
+                0.0, 0.0, 1.0, 0.0
+            ]
+            
+            # Set image dimensions
+            camera_info.width = width
+            camera_info.height = height
+            
+            return camera_info
+        
+        def _extract_camera_intrinsics(self, camera_name: str, camera_data_dict: dict) -> tuple:
+            """
+            Extract camera intrinsics from camera data.
+            
+            Args:
+                camera_name (str): Name of the camera
+                camera_data_dict (dict): Camera data dictionary
+                
+            Returns:
+                tuple: (fx, fy, cx, cy) camera intrinsics or None if not available
+            """
+            try:
+                # Check if we have intrinsics in the camera data
+                if 'intrinsics' in camera_data_dict:
+                    intrinsics = camera_data_dict['intrinsics']
+                    if intrinsics is not None and len(intrinsics) == 4:
+                        return intrinsics
+                    else:
+                        print(f"Warning: Intrinsics for {camera_name} are None or invalid: {intrinsics}")
+                
+                # If not, try to get intrinsics from the camera object
+                # This would require access to the actual camera object
+                # For now, we'll return None and let the calling code handle it
+                print(f"Warning: No intrinsics found for camera {camera_name}")
+                return None
+                
+            except Exception as e:
+                print(f"Error extracting intrinsics for camera {camera_name}: {e}")
+                return None
         
         def destroy_node(self):
             """Clean up the node and database."""
