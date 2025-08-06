@@ -15,6 +15,8 @@
 
 
 """
+Written by: @christopher-hsu
+
 ROS2 Manager for MobilityGen Extension
 
 This module provides ROS2 functionality for the MobilityGen extension,
