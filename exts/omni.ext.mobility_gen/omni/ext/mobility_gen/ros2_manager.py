@@ -77,13 +77,32 @@ try:
     from rclpy.serialization import serialize_message
     from std_msgs.msg import String, Header, Float64MultiArray
     from sensor_msgs.msg import Image, CameraInfo
-    from geometry_msgs.msg import PoseStamped, TwistStamped
+    from geometry_msgs.msg import PoseStamped, TwistStamped, TransformStamped
     from cv_bridge import CvBridge
+
+    # Import TF2 modules for transform publishing
+    try:
+        from tf2_ros import TransformBroadcaster
+        TF2_AVAILABLE = True
+        print("✓ TF2 imports successful")
+    except ImportError as e:
+        print(f"✗ TF2 import failed: {e}")
+        TF2_AVAILABLE = False
     
     print("✓ All ROS2 imports successful")
     
     class SimpleROS2Writer(Node):
-        """Simple ROS2 writer for streaming and bag recording."""
+        """Simple ROS2 writer for streaming and bag recording.
+        
+        This class provides ROS2 functionality for streaming and bag recording,
+        including:
+        - PoseStamped messages for robot poses
+        - TransformStamped messages (TF2) for robot transforms
+        - Camera data publishing (RGB, depth, segmentation)
+        - Joint data publishing
+        - Keyboard input publishing
+        - Bag file recording with SQLite backend
+        """
         
         def __init__(self, namespace: str = "/mobility_gen", enable_compression: bool = False, 
                      bag_path: str = None, mode: str = "Stream + Bag"):
@@ -114,6 +133,14 @@ try:
             self.topic_cache = {}  # Cache topic IDs to reduce database lookups
             self.dropped_messages = 0
             self.total_messages = 0
+            
+            # Initialize TF2 broadcaster for transform publishing
+            if TF2_AVAILABLE:
+                self.tf_broadcaster = TransformBroadcaster(self)
+                print("✓ TF2 broadcaster initialized")
+            else:
+                self.tf_broadcaster = None
+                print("⚠ TF2 not available, transform publishing disabled")
             
             self._init_publishers()
             print(f"✓ Publishers initialized")
@@ -262,12 +289,70 @@ try:
                 publisher_dict[sanitized_name] = self.create_publisher(msg_type, topic_name, 10)
             return publisher_dict[sanitized_name]
         
-        def _create_header(self):
-            """Create a ROS2 header with current timestamp."""
+        def _create_header(self, frame_id: str = None):
+            """Create a ROS2 header with current timestamp and unified frame_id.
+            
+            Args:
+                frame_id: Specific frame_id to use. If None, uses namespace-based default.
+            """
             header = Header()
             header.stamp = self.get_clock().now().to_msg()
-            header.frame_id = "map"
+            
+            if frame_id is None:
+                # Use namespace-based frame_id
+                namespace_clean = self.namespace.lstrip('/')
+                header.frame_id = f"{namespace_clean}/world"
+            else:
+                header.frame_id = frame_id
+            
             return header
+        
+        def _publish_robot_transform(self, position, orientation, child_frame_id: str = None):
+            """Publish robot pose as a transform using TF2.
+            
+            This method publishes the robot's current pose as a transform from the namespace-based world frame
+            to the specified child frame. This allows other ROS2 nodes to easily access the robot's pose 
+            in the world coordinate system.
+            
+            Args:
+                position: Robot position as [x, y, z]
+                orientation: Robot orientation as [x, y, z, w] quaternion
+                child_frame_id: The child frame ID for the transform (default: uses namespace + "/forward_link")
+            """
+            if not TF2_AVAILABLE or self.tf_broadcaster is None:
+                return
+            
+            try:
+                transform = TransformStamped()
+                transform.header.stamp = self.get_clock().now().to_msg()
+                
+                # Use namespace-based frame_id
+                namespace_clean = self.namespace.lstrip('/')
+                transform.header.frame_id = f"{namespace_clean}/world"
+                
+                # Use namespace for child_frame_id if not specified
+                if child_frame_id is None:
+                    transform.child_frame_id = f"{namespace_clean}/forward_link"
+                else:
+                    transform.child_frame_id = child_frame_id
+                
+                # Set translation
+                transform.transform.translation.x = float(position[0])
+                transform.transform.translation.y = float(position[1])
+                transform.transform.translation.z = float(position[2])
+                
+                # Set rotation
+                transform.transform.rotation.x = float(orientation[0])
+                transform.transform.rotation.y = float(orientation[1])
+                transform.transform.rotation.z = float(orientation[2])
+                transform.transform.rotation.w = float(orientation[3])
+                
+                # Publish the transform
+                self.tf_broadcaster.sendTransform(transform)
+                
+            except Exception as e:
+                print(f"Error publishing robot transform: {e}")
+                traceback.print_exc()
         
         def _get_or_create_topic_id(self, topic_name: str, msg_type: str) -> int:
             """Get or create a topic ID for bag recording (thread-safe with caching)."""
@@ -425,8 +510,7 @@ try:
                 # Publish robot pose
                 if 'robot.position' in robot_data and 'robot.orientation' in robot_data:
                     pose_msg = PoseStamped()
-                    pose_msg.header = self._create_header()
-                    pose_msg.header.frame_id = "world"
+                    pose_msg.header = self._create_header()  # Uses unified frame_id
                     
                     position = robot_data['robot.position']
                     orientation = robot_data['robot.orientation']
@@ -443,12 +527,16 @@ try:
                     if not hasattr(self, 'robot_pose_publisher'):
                         self.robot_pose_publisher = self.create_publisher(PoseStamped, topic_name, 10)
                     self._publish_message(pose_msg, topic_name, "geometry_msgs/msg/PoseStamped", self.robot_pose_publisher)
+                    
+                    # Publish robot pose as transform
+                    self._publish_robot_transform(position, orientation)
                 
                 # Publish robot twist (action)
                 if 'robot.action' in robot_data:
                     twist_msg = TwistStamped()
-                    twist_msg.header = self._create_header()
-                    twist_msg.header.frame_id = "base_link"
+                    # Use namespace-based base_link frame_id
+                    namespace_clean = self.namespace.lstrip('/')
+                    twist_msg.header = self._create_header(f"{namespace_clean}/base_link")
                     
                     action = robot_data['robot.action']
                     twist_msg.twist.linear.x = float(action[0])
@@ -504,7 +592,7 @@ try:
                             position = camera_data_dict['position']
                             if position is not None:
                                 pose_msg = PoseStamped()
-                                pose_msg.header = self._create_header()
+                                pose_msg.header = self._create_header()  # Uses unified frame_id
                                 pose_msg.pose.position.x = float(position[0])
                                 pose_msg.pose.position.y = float(position[1])
                                 pose_msg.pose.position.z = float(position[2])
@@ -574,7 +662,9 @@ try:
                             if rgb_image is not None and rgb_image.size > 0:
                                 try:
                                     ros_image = self.cv_bridge.cv2_to_imgmsg(rgb_image, "rgb8")
-                                    ros_image.header = self._create_header()
+                                    # Use camera-specific frame_id
+                                    namespace_clean = self.namespace.lstrip('/')
+                                    ros_image.header = self._create_header(f"{namespace_clean}/{sanitized_name}_optical_frame")
                                     
                                     topic_name = f"{self.namespace}/rgb/{sanitized_name}"
                                     if topic_name not in self.rgb_publishers:
@@ -593,7 +683,9 @@ try:
                                 try:
                                     depth_uint16 = depth_image.astype(np.uint16)
                                     ros_image = self.cv_bridge.cv2_to_imgmsg(depth_uint16, "mono16")
-                                    ros_image.header = self._create_header()
+                                    # Use camera-specific frame_id
+                                    namespace_clean = self.namespace.lstrip('/')
+                                    ros_image.header = self._create_header(f"{namespace_clean}/{sanitized_name}_optical_frame")
                                     
                                     topic_name = f"{self.namespace}/depth/{sanitized_name}"
                                     if topic_name not in self.depth_publishers:
@@ -618,7 +710,9 @@ try:
                                         encoding = "mono8"
                                     
                                     ros_image = self.cv_bridge.cv2_to_imgmsg(seg_image, encoding)
-                                    ros_image.header = self._create_header()
+                                    # Use camera-specific frame_id
+                                    namespace_clean = self.namespace.lstrip('/')
+                                    ros_image.header = self._create_header(f"{namespace_clean}/{sanitized_name}_optical_frame")
                                     
                                     topic_name = f"{self.namespace}/segmentation/{sanitized_name}"
                                     if topic_name not in self.segmentation_publishers:
@@ -653,7 +747,11 @@ try:
             
             camera_info = CameraInfo()
             camera_info.header = self._create_header()
-            camera_info.header.frame_id = f"{camera_name}_optical_frame"
+            
+            # Use namespace-based camera frame_id
+            namespace_clean = self.namespace.lstrip('/')
+            sanitized_camera_name = self._sanitize_topic_name(camera_name)
+            camera_info.header.frame_id = f"{namespace_clean}/{sanitized_camera_name}_optical_frame"
             
             # Set camera matrix (3x3)
             camera_info.k = [
