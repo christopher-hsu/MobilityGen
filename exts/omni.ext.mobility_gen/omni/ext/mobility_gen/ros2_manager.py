@@ -29,10 +29,11 @@ import sqlite3
 import numpy as np
 from typing import Optional, Dict, Any
 import traceback
+import threading
+import queue
 
 # Performance profiling
 import time as time_module
-
 
 # ROS2 availability flag
 ROS2_AVAILABLE = False
@@ -104,6 +105,16 @@ try:
             self.camera_publish_frequency = 10
             self.last_camera_publish_step = -1
             
+            # Thread-safe database operations with better queue management
+            self.db_queue = queue.Queue(maxsize=1000)  # Limit queue size
+            self.db_thread = None
+            self.db_conn = None
+            self.db_cursor = None
+            self.db_running = False
+            self.topic_cache = {}  # Cache topic IDs to reduce database lookups
+            self.dropped_messages = 0
+            self.total_messages = 0
+            
             self._init_publishers()
             print(f"✓ Publishers initialized")
             
@@ -114,35 +125,112 @@ try:
 
         
         def _init_bag_database(self):
-            """Initialize the SQLite database for the ROS2 bag."""
+            """Initialize the SQLite database for the ROS2 bag with thread safety."""
             os.makedirs(os.path.dirname(self.bag_path), exist_ok=True)
             
-            self.db_conn = sqlite3.connect(self.bag_path)
-            self.db_cursor = self.db_conn.cursor()
+            # Create response queue for topic ID lookups
+            self.response_queue = queue.Queue()
             
-            # Create tables for ROS2 bag format
-            self.db_cursor.execute('''
-                CREATE TABLE IF NOT EXISTS topics (
-                    id INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    serialization_format TEXT NOT NULL,
-                    offered_qos_profiles TEXT NOT NULL
-                )
-            ''')
+            # Start database thread
+            self.db_running = True
+            self.db_thread = threading.Thread(target=self._db_worker, daemon=True)
+            self.db_thread.start()
             
-            self.db_cursor.execute('''
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY,
-                    topic_id INTEGER NOT NULL,
-                    timestamp INTEGER NOT NULL,
-                    data BLOB NOT NULL,
-                    FOREIGN KEY (topic_id) REFERENCES topics (id)
-                )
-            ''')
+            # Wait for database to be ready
+            while not hasattr(self, '_db_ready') or not self._db_ready:
+                time.sleep(0.01)
             
-            self.db_conn.commit()
             print("✓ Bag database initialized")
+        
+        def _db_worker(self):
+            """Database worker thread that handles all database operations."""
+            try:
+                # Create database connection in this thread
+                self.db_conn = sqlite3.connect(self.bag_path)
+                self.db_cursor = self.db_conn.cursor()
+                
+                # Create tables for ROS2 bag format
+                self.db_cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS topics (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        serialization_format TEXT NOT NULL,
+                        offered_qos_profiles TEXT NOT NULL
+                    )
+                ''')
+                
+                self.db_cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id INTEGER PRIMARY KEY,
+                        topic_id INTEGER NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        data BLOB NOT NULL,
+                        FOREIGN KEY (topic_id) REFERENCES topics (id)
+                    )
+                ''')
+                
+                self.db_conn.commit()
+                self._db_ready = True
+                
+                # Process database operations from queue
+                while self.db_running:
+                    try:
+                        operation = self.db_queue.get(timeout=0.1)
+                        if operation is None:  # Shutdown signal
+                            break
+                        
+                        op_type, args = operation
+                        if op_type == 'get_or_create_topic_id':
+                            topic_name, msg_type = args
+                            result = self._db_get_or_create_topic_id(topic_name, msg_type)
+                            # Send result back through a separate response queue
+                            if hasattr(self, 'response_queue'):
+                                self.response_queue.put(('result', result))
+                        elif op_type == 'write_message':
+                            topic_id, timestamp, data = args
+                            self._db_write_message(topic_id, timestamp, data)
+                        elif op_type == 'close':
+                            break
+                            
+                    except queue.Empty:
+                        continue
+                    except Exception as e:
+                        print(f"Error in database worker: {e}")
+                        traceback.print_exc()
+                
+            except Exception as e:
+                print(f"Error initializing database worker: {e}")
+                traceback.print_exc()
+            finally:
+                if hasattr(self, 'db_conn') and self.db_conn:
+                    self.db_conn.close()
+        
+        def _db_get_or_create_topic_id(self, topic_name: str, msg_type: str) -> int:
+            """Get or create a topic ID (called from database thread)."""
+            self.db_cursor.execute(
+                "SELECT id FROM topics WHERE name = ? AND type = ?",
+                (topic_name, msg_type)
+            )
+            result = self.db_cursor.fetchone()
+            
+            if result:
+                return result[0]
+            else:
+                self.db_cursor.execute(
+                    "INSERT INTO topics (name, type, serialization_format, offered_qos_profiles) VALUES (?, ?, ?, ?)",
+                    (topic_name, msg_type, "cdr", "[]")
+                )
+                self.db_conn.commit()
+                return self.db_cursor.lastrowid
+        
+        def _db_write_message(self, topic_id: int, timestamp: int, data: bytes):
+            """Write a message to database (called from database thread)."""
+            self.db_cursor.execute(
+                "INSERT INTO messages (topic_id, timestamp, data) VALUES (?, ?, ?)",
+                (topic_id, timestamp, data)
+            )
+            self.db_conn.commit()
         
         def _init_publishers(self):
             """Initialize ROS2 publishers."""
@@ -182,33 +270,53 @@ try:
             return header
         
         def _get_or_create_topic_id(self, topic_name: str, msg_type: str) -> int:
-            """Get or create a topic ID for bag recording."""
-            self.db_cursor.execute(
-                "SELECT id FROM topics WHERE name = ? AND type = ?",
-                (topic_name, msg_type)
-            )
-            result = self.db_cursor.fetchone()
+            """Get or create a topic ID for bag recording (thread-safe with caching)."""
+            # Check cache first
+            cache_key = f"{topic_name}:{msg_type}"
+            if cache_key in self.topic_cache:
+                return self.topic_cache[cache_key]
             
-            if result:
-                return result[0]
-            else:
-                self.db_cursor.execute(
-                    "INSERT INTO topics (name, type, serialization_format, offered_qos_profiles) VALUES (?, ?, ?, ?)",
-                    (topic_name, msg_type, "cdr", "[]")
-                )
-                self.db_conn.commit()
-                return self.db_cursor.lastrowid
+            # Try to send request to database thread (non-blocking)
+            try:
+                self.db_queue.put_nowait(('get_or_create_topic_id', (topic_name, msg_type)))
+                
+                # Wait for result with timeout
+                try:
+                    result = self.response_queue.get(timeout=0.5)
+                    if result[0] == 'result':
+                        topic_id = result[1]
+                        # Cache the result
+                        self.topic_cache[cache_key] = topic_id
+                        return topic_id
+                except queue.Empty:
+                    print(f"WARNING: Timeout waiting for topic ID for {topic_name}")
+                    # Return a default topic ID to prevent blocking
+                    return 1
+                    
+            except queue.Full:
+                print(f"WARNING: ROS2 queue full, dropping data for topic {topic_name}")
+                self.dropped_messages += 1
+                # Return a default topic ID to prevent blocking
+                return 1
         
         def _write_to_bag(self, topic_name: str, msg, msg_type: str):
-            """Write a message to the bag file."""
-            topic_id = self._get_or_create_topic_id(topic_name, msg_type)
-            serialized_data = serialize_message(msg)
-            timestamp = int(time.time() * 1e9)  # Nanoseconds
-            self.db_cursor.execute(
-                "INSERT INTO messages (topic_id, timestamp, data) VALUES (?, ?, ?)",
-                (topic_id, timestamp, serialized_data)
-            )
-            self.db_conn.commit()
+            """Write a message to the bag file (thread-safe, non-blocking)."""
+            try:
+                topic_id = self._get_or_create_topic_id(topic_name, msg_type)
+                serialized_data = serialize_message(msg)
+                timestamp = int(time.time() * 1e9)  # Nanoseconds
+                
+                # Try to send write request to database thread (non-blocking)
+                try:
+                    self.db_queue.put_nowait(('write_message', (topic_id, timestamp, serialized_data)))
+                    self.total_messages += 1
+                except queue.Full:
+                    print(f"WARNING: ROS2 queue full, dropping data for step")
+                    self.dropped_messages += 1
+                    
+            except Exception as e:
+                print(f"Error writing to bag: {e}")
+                traceback.print_exc()
         
         def _publish_message(self, msg, topic_name: str, msg_type: str, publisher=None):
             """Publish a message to topic and/or bag."""
@@ -600,10 +708,34 @@ try:
                 print(f"Error extracting intrinsics for camera {camera_name}: {e}")
                 return None
         
+        def get_queue_stats(self):
+            """Get queue statistics for monitoring."""
+            return {
+                'queue_size': self.db_queue.qsize(),
+                'max_queue_size': self.db_queue.maxsize,
+                'dropped_messages': self.dropped_messages,
+                'total_messages': self.total_messages,
+                'drop_rate': self.dropped_messages / max(self.total_messages, 1) * 100
+            }
+        
         def destroy_node(self):
             """Clean up the node and database."""
-            if hasattr(self, 'db_conn') and self.db_conn is not None:
-                self.db_conn.close()
+            # Stop database thread
+            if hasattr(self, 'db_running') and self.db_running:
+                self.db_running = False
+                if hasattr(self, 'db_queue'):
+                    self.db_queue.put(('close', None))
+                
+                # Wait for database thread to finish
+                if hasattr(self, 'db_thread') and self.db_thread:
+                    self.db_thread.join(timeout=2.0)
+                    if self.db_thread.is_alive():
+                        print("Warning: Database thread did not shut down cleanly")
+                
+                # Print final statistics
+                stats = self.get_queue_stats()
+                print(f"Final queue stats: {stats['total_messages']} messages, {stats['dropped_messages']} dropped ({stats['drop_rate']:.1f}%)")
+            
             super().destroy_node()
     
     # Set the global variables
@@ -631,7 +763,7 @@ class ROS2Manager:
         self.ros2_enabled: bool = False
         self.ros2_namespace: str = "/mobility_gen"
         self.ros2_compression: bool = False
-    
+        
     def is_available(self) -> bool:
         """Check if ROS2 is available."""
         return ROS2_AVAILABLE
@@ -671,7 +803,8 @@ class ROS2Manager:
             return None
     
     def cleanup(self):
-        """Clean up ROS2 resources."""
+        """Clean up ROS2 and ROS1 bag resources."""
+        # Clean up ROS2 writer
         if self.ros2_writer is not None:
             try:
                 self.ros2_writer.destroy_node()
@@ -689,6 +822,7 @@ class ROS2Manager:
     
     def write_state(self, state_dict: dict, step: int):
         """Write state data to ROS2 if enabled."""
+        # Write to ROS2
         if self.ros2_writer is not None:
             try:
                 self.ros2_writer.write_state_dict_common(state_dict, step)

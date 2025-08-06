@@ -131,18 +131,18 @@ class MobilityGenExtension(omni.ext.IExt):
                         ui.Button("Start Recording", clicked_fn=self.enable_recording)
                         ui.Button("Stop Recording", clicked_fn=self.disable_recording)
 
-                # Separate ROS2 Streaming Section
+                # ROS2 Streaming and Recording Section
                 if self.ros2_manager.is_available():
                     with ui.VStack():
-                        ui.Label("ROS2 Streaming")
+                        ui.Label("ROS2 Streaming & Recording")
                         with ui.HStack():
-                            ui.Label("Enable ROS2")
+                            ui.Label("Enable ROS")
                             self.ros2_streaming_enabled_checkbox = ui.CheckBox()
                             self.ros2_streaming_enabled_checkbox.model.set_value(False)
                         
                         with ui.HStack():
                             ui.Label("Mode")
-                            self.ros2_streaming_mode_combo = ui.ComboBox(0, "Stream Only", "Bag Only", "Stream + Bag")
+                            self.ros2_streaming_mode_combo = ui.ComboBox(0, "Streaming Only", "ROS2 Bag Only", "Streaming + ROS2 Bag")
                         
                         with ui.HStack():
                             ui.Label("Namespace")
@@ -155,11 +155,11 @@ class MobilityGenExtension(omni.ext.IExt):
                             self.ros2_streaming_camera_images_checkbox.model.set_value(True)
                         
                         with ui.HStack():
-                            ui.Button("Start ROS2 Streaming", clicked_fn=self.start_ros2_streaming)
-                            ui.Button("Stop ROS2 Streaming", clicked_fn=self.stop_ros2_streaming)
+                            ui.Button("Start ROS Streaming", clicked_fn=self.start_ros2_streaming)
+                            ui.Button("Stop ROS Streaming", clicked_fn=self.stop_ros2_streaming)
                         
-                        # ROS2 streaming status
-                        self.ros2_streaming_status_label = ui.Label("ROS2 Streaming: Disabled")
+                        # ROS streaming status
+                        self.ros2_streaming_status_label = ui.Label("ROS Streaming: Disabled")
 
     def build_occ_map_frame(self):
         if self.scenario is not None:
@@ -248,37 +248,48 @@ class MobilityGenExtension(omni.ext.IExt):
         self.clear_recording()
 
     def start_ros2_streaming(self):
-        """Start ROS2 streaming."""
+        """Start ROS2 streaming and recording."""
         try:
             # Get UI settings
             namespace = self.ros2_streaming_namespace_field.model.get_value_as_string()
             mode_index = self.ros2_streaming_mode_combo.model.get_item_value_model().get_value_as_int()
-            mode_options = ["Stream Only", "Bag Only", "Stream + Bag"]
+            mode_options = ["Streaming Only", "ROS2 Bag Only", "Streaming + ROS2 Bag"]
             mode = mode_options[mode_index]
             publish_camera_images = self.ros2_streaming_camera_images_checkbox.model.get_value_as_bool()
             
-            print(f"Starting ROS2 streaming:")
+            print(f"Starting ROS2 streaming/recording:")
             print(f"  Namespace: {namespace}")
             print(f"  Mode: {mode}")
             print(f"  Publish Images: {publish_camera_images}")
             
             try:
-                # Initialize ROS2 for streaming
-                self.ros2_manager.initialize_ros2()
+                # Initialize ROS2
+                if not self.ros2_manager.initialize_ros2():
+                    print("Failed to initialize ROS2")
+                    return
                 
-                # Create ROS2 writer for streaming
-                bag_path = None
-                if mode in ["Bag Only", "Stream + Bag"]:
-                    # Create a temporary bag file for streaming
+                # Create bag path
+                ros2_bag_path = None
+                if mode in ["ROS2 Bag Only", "Streaming + ROS2 Bag"]:
                     import tempfile
-                    bag_path = os.path.join(tempfile.gettempdir(), f"mobility_gen_streaming_{int(time.time())}.db3")
+                    ros2_bag_path = os.path.join(tempfile.gettempdir(), f"mobility_gen_ros2_{int(time.time())}.db3")
                 
-                # Create and store the ROS2 writer
+                # Create ROS2 writer
+                # Map UI modes to ROS2 writer modes
+                if mode == "Streaming Only":
+                    ros2_mode = "Stream Only"
+                elif mode == "ROS2 Bag Only":
+                    ros2_mode = "Bag Only"
+                elif mode == "Streaming + ROS2 Bag":
+                    ros2_mode = "Stream + Bag"
+                else:
+                    ros2_mode = "Stream Only"
+                
                 self.ros2_manager.ros2_writer = self.ros2_manager.create_writer(
                     namespace=namespace,
-                    compression=False,  # No compression option in new UI
-                    bag_path=bag_path,
-                    mode=mode
+                    compression=False,
+                    bag_path=ros2_bag_path,
+                    mode=ros2_mode
                 )
                 
                 if self.ros2_manager.ros2_writer is None:
@@ -287,8 +298,8 @@ class MobilityGenExtension(omni.ext.IExt):
                 
                 # Store settings
                 self.ros2_manager.ros2_writer.publish_camera_images = publish_camera_images
-                self.ros2_manager.ros2_writer.enable_processing = True  # Always enable processing for streaming
-                self.ros2_manager.ros2_writer.camera_images_only = False  # No camera images only option in new UI
+                self.ros2_manager.ros2_writer.enable_processing = True
+                self.ros2_manager.ros2_writer.camera_images_only = False
                 
                 # Reset streaming counters
                 self.ros2_streaming_step = 0
@@ -302,7 +313,9 @@ class MobilityGenExtension(omni.ext.IExt):
                 self.ros2_streaming_enabled = True
                 self.ros2_streaming_status_label.text = f"ROS2 Streaming: Enabled ({mode})"
                 
-                print(f"ROS2 streaming started successfully")
+                print(f"ROS2 streaming/recording started successfully")
+                if ros2_bag_path:
+                    print(f"ROS2 bag path: {ros2_bag_path}")
                 
             except Exception as e:
                 print(f"Error starting ROS2 streaming: {e}")
@@ -315,19 +328,20 @@ class MobilityGenExtension(omni.ext.IExt):
             traceback.print_exc()
 
     def stop_ros2_streaming(self):
-        """Stop ROS2 streaming."""
+        """Stop ROS2 streaming and recording."""
         try:
             # Stop ROS2 thread
             self._stop_ros2_thread()
             
             # Cleanup ROS2
-            self.ros2_manager.cleanup()
+            if self.ros2_manager.ros2_writer is not None:
+                self.ros2_manager.cleanup()
             
             # Update UI
             self.ros2_streaming_enabled = False
             self.ros2_streaming_status_label.text = "ROS2 Streaming: Disabled"
             
-            print("ROS2 streaming stopped")
+            print("ROS2 streaming/recording stopped")
             
         except Exception as e:
             print(f"Error stopping ROS2 streaming: {e}")
@@ -430,19 +444,17 @@ class MobilityGenExtension(omni.ext.IExt):
                     full_state_dict.update(state_dict_depth)
                     full_state_dict.update(state_dict_segmentation)
                     
-                    # Publish to ROS2 (including camera data) in this thread
+                    # Publish to ROS2 (if enabled)
                     if self.ros2_manager.ros2_writer is not None:
                         # Publish common state data
                         self.ros2_manager.ros2_writer.write_state_dict_common(state_dict_common, step)
                         
                         # Publish camera data separately in this thread
                         self.ros2_manager.ros2_writer.write_common_state_data(full_state_dict, step)
-                        
-                        # Print status every 60 steps (about once per second)
-                        if step % 60 == 0:
-                            print(f"ROS2: Streaming step {step} with camera data")
-                    else:
-                        print(f"WARNING: ROS2 writer is None, cannot publish step {step}")
+                    
+                    # Print status every 60 steps (about once per second)
+                    if step % 60 == 0:
+                        print(f"ROS2: Streaming step {step} with camera data")
                     
             except queue.Empty:
                 # No data available, continue
