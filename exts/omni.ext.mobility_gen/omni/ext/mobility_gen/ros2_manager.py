@@ -34,6 +34,9 @@ import traceback
 import threading
 import queue
 
+# Import scipy for quaternion transformations
+from scipy.spatial.transform import Rotation
+
 # Performance profiling
 import time as time_module
 
@@ -432,10 +435,11 @@ try:
                 transform.transform.translation.z = float(position[2])
                 
                 # Set rotation
-                transform.transform.rotation.x = float(orientation[0])
-                transform.transform.rotation.y = float(orientation[1])
-                transform.transform.rotation.z = float(orientation[2])
-                transform.transform.rotation.w = float(orientation[3])
+                # isaac sim uses wxyz convention for quaternions
+                transform.transform.rotation.x = float(orientation[1])
+                transform.transform.rotation.y = float(orientation[2])
+                transform.transform.rotation.z = float(orientation[3])
+                transform.transform.rotation.w = float(orientation[0])
                 
                 # Publish the transform via TF2
                 self.tf_broadcaster.sendTransform(transform)
@@ -621,10 +625,11 @@ try:
                     pose_msg.pose.position.x = float(position[0])
                     pose_msg.pose.position.y = float(position[1])
                     pose_msg.pose.position.z = float(position[2])
-                    pose_msg.pose.orientation.x = float(orientation[0])
-                    pose_msg.pose.orientation.y = float(orientation[1])
-                    pose_msg.pose.orientation.z = float(orientation[2])
-                    pose_msg.pose.orientation.w = float(orientation[3])
+                    # isaac sim uses wxyz convention for quaternions
+                    pose_msg.pose.orientation.x = float(orientation[1])
+                    pose_msg.pose.orientation.y = float(orientation[2])
+                    pose_msg.pose.orientation.z = float(orientation[3])
+                    pose_msg.pose.orientation.w = float(orientation[0])
                     
                     topic_name = f"{self.namespace}/robot/pose"
                     if not hasattr(self, 'robot_pose_publisher'):
@@ -686,30 +691,90 @@ try:
                 traceback.print_exc()
 
         def _publish_camera_data_with_images(self, camera_data: dict, step: int):
-            """Publish camera data with images to ROS2 topics."""
+            """Publish camera data with images to ROS2 topics.
+            Camera pose in the Isaac Sim USD camera prim coordinate system, ie. forward -Z and Up +Y
+            We need to transform the camera pose to the ROS2 coordinate system, ie. forward +Z and Up -Y
+            https://docs.isaacsim.omniverse.nvidia.com/4.2.0/reference_conventions.html
+            """
             try:
                 # Always publish camera metadata (lightweight)
                 for camera_name, camera_data_dict in camera_data.items():
                     if 'position' in camera_data_dict:
                         try:
                             position = camera_data_dict['position']
-                            if position is not None:
-                                pose_msg = PoseStamped()
-                                pose_msg.header = self._create_header()  # Uses unified frame_id
-                                pose_msg.pose.position.x = float(position[0])
-                                pose_msg.pose.position.y = float(position[1])
-                                pose_msg.pose.position.z = float(position[2])
+                            orientation = camera_data_dict.get('orientation')
+
+                            # Validate position and orientation data
+                            if position is None or orientation is None:
+                                print(f"Warning: Missing position or orientation data for camera {camera_name}")
+                                continue
+                            
+                            # Ensure orientation is a valid array
+                            if not isinstance(orientation, (list, np.ndarray)) or len(orientation) != 4:
+                                print(f"Warning: Invalid orientation data for camera {camera_name}: {orientation}")
+                                continue
+
+                            # Convert quaternion from WXYZ to XYZW format for scipy
+                            orientation_xyzw = np.array([orientation[1], orientation[2], orientation[3], orientation[0]])
+                            
+                            try:
+                                # Create rotation object from quaternion
+                                R_camera_prim = Rotation.from_quat(orientation_xyzw)
                                 
-                                sanitized_name = self._sanitize_topic_name(camera_name)
-                                topic_name = f"{self.namespace}/camera/{sanitized_name}/pose"
-                                if not hasattr(self, 'camera_pose_publishers'):
-                                    self.camera_pose_publishers = {}
-                                if topic_name not in self.camera_pose_publishers:
-                                    self.camera_pose_publishers[topic_name] = self.create_publisher(
-                                        PoseStamped, topic_name, 10
-                                    )
-                                self._publish_message(pose_msg, topic_name, "geometry_msgs/msg/PoseStamped", 
-                                                    self.camera_pose_publishers[topic_name])
+                                # The transformation needed:
+                                # Camera Z (blue, -X) -> Robot X (red, +X) - need 180° around Y
+                                # Camera Y (green, +Z) -> Robot -Z (down) - need 180° around X
+                                # This requires both rotations: first around Y, then around X
+                                T_rotation_y = Rotation.from_rotvec([0, np.pi, 0])  # 180 degrees around Y-axis
+                                T_rotation_x = Rotation.from_rotvec([np.pi, 0, 0])  # 180 degrees around X-axis
+                                
+                                # Apply the transformations: R_ros2 = T_x * T_y * R_camera_prim * T_y^(-1) * T_x^(-1)
+                                R_ros2 = T_rotation_x * T_rotation_y * R_camera_prim * T_rotation_y.inv() * T_rotation_x.inv()
+                                
+                                # Convert back to WXYZ format
+                                orientationXYZW = R_ros2.as_quat()
+                                orientationWXYZ = [orientationXYZW[3], orientationXYZW[0], orientationXYZW[1], orientationXYZW[2]]
+                                
+                                # Position remains unchanged (already in world frame)
+                                position_transformed = position
+                                
+                                # Debug output (only print occasionally to avoid spam)
+                                if step % 1000 == 0:
+                                    print(f"Camera {camera_name} transformation:")
+                                    print(f"  Position (world frame, unchanged): {position}")
+                                    print(f"  Original orientation (camera prim convention): {orientation}")
+                                    print(f"  Transformed orientation (ROS2 convention): {orientationWXYZ}")
+                                    
+                            except Exception as e:
+                                print(f"Warning: Failed to transform camera orientation for {camera_name}: {e}")
+                                # Use original orientation if transformation fails
+                                orientationWXYZ = orientation
+                                position_transformed = position
+
+                            pose_msg = PoseStamped()
+                            pose_msg.header = self._create_header()  # Uses unified frame_id
+                            pose_msg.pose.position.x = float(position_transformed[0])
+                            pose_msg.pose.position.y = float(position_transformed[1])
+                            pose_msg.pose.position.z = float(position_transformed[2])
+                            # isaac sim uses wxyz convention for quaternions
+                            pose_msg.pose.orientation.x = float(orientationWXYZ[1])
+                            pose_msg.pose.orientation.y = float(orientationWXYZ[2])
+                            pose_msg.pose.orientation.z = float(orientationWXYZ[3])
+                            pose_msg.pose.orientation.w = float(orientationWXYZ[0])
+                            
+                            sanitized_name = self._sanitize_topic_name(camera_name)
+                            topic_name = f"{self.namespace}/camera/{sanitized_name}/pose"
+                            if not hasattr(self, 'camera_pose_publishers'):
+                                self.camera_pose_publishers = {}
+                            if topic_name not in self.camera_pose_publishers:
+                                self.camera_pose_publishers[topic_name] = self.create_publisher(
+                                    PoseStamped, topic_name, 10
+                                )
+                            self._publish_message(pose_msg, topic_name, "geometry_msgs/msg/PoseStamped", 
+                                                self.camera_pose_publishers[topic_name])
+
+                            # Publish camera pose as transform
+                            self._publish_robot_transform(position_transformed, orientationWXYZ, f"{self.namespace}/camera/{sanitized_name}_optical_frame")
                                     
                         except Exception as e:
                             print(f"Error publishing camera pose for {camera_name}: {e}")
