@@ -124,6 +124,7 @@ try:
             self.enable_compression = enable_compression
             self.bag_path = bag_path
             self.mode = mode
+            self.scenario = None
             
             # Camera publishing settings
             self.publish_camera_images = True
@@ -531,9 +532,12 @@ try:
             topic_name = f"{self.namespace}/common_state"
             self._publish_message(msg, topic_name, "std_msgs/msg/String", self.common_state_pub)
         
-        def write_common_state_data(self, state_dict: dict, step: int):
+        def write_common_state_data(self, state_dict: dict, step: int, scenario=None):
             """Extract and publish all data from state to ROS2 topics."""
             try:
+                if self.scenario is None:
+                    self.scenario = scenario
+                
                 # Check if processing is enabled
                 if not self.enable_processing:
                     return
@@ -785,8 +789,24 @@ try:
                         try:
                             intrinsics = self._extract_camera_intrinsics(camera_name, camera_data_dict)
                             if intrinsics is not None:
-                                # Get resolution from camera data or use default
-                                resolution = camera_data_dict.get('resolution', (960, 600))  # Default HawkCamera resolution
+                                # Get resolution from camera object
+                                resolution = None
+                                if hasattr(self, 'scenario') and self.scenario is not None:
+                                    # Get the appropriate camera based on camera name
+                                    if camera_name == 'robot.front_camera':
+                                        # Single camera (RealSense, etc.)
+                                        resolution = self.scenario.robot.front_camera.resolution
+                                    elif camera_name == 'robot.front_camera.left':
+                                        # Left camera from stereo setup (HawkCamera)
+                                        resolution = self.scenario.robot.front_camera.left.resolution
+                                    elif camera_name == 'robot.front_camera.right':
+                                        # Right camera from stereo setup (HawkCamera)
+                                        resolution = self.scenario.robot.front_camera.right.resolution
+                                
+                                # Final fallback to default
+                                if resolution is None:
+                                    print(f"WARNING: No resolution found for camera {camera_name}, using default")
+                                    resolution = (848, 480)  # Default fallback
                                 
                                 camera_info_msg = self._create_camera_info_message(camera_name, intrinsics, resolution)
                                 sanitized_name = self._sanitize_topic_name(camera_name)

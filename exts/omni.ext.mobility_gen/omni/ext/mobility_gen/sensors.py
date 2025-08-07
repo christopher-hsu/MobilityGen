@@ -82,8 +82,30 @@ class Camera(Sensor):
 
     def enable_rendering(self):
         
+        # Find the actual camera prim for rendering
+        camera_prim = self._find_camera_prim()
+        if camera_prim is None:
+            # Fallback to using the prim_path
+            render_path = self._prim_path
+        else:
+            render_path = str(camera_prim.GetPath())
+        
+        # For RealSense, use the Color camera for RGB data
+        stage = get_stage()
+        if "RSD455" in self._prim_path:
+            rsd455_path = self._prim_path
+            if not rsd455_path.endswith("RSD455"):
+                rsd455_path = os.path.join(self._prim_path, "RSD455")
+            
+            rsd455_prim = stage_get_prim(stage, rsd455_path)
+            if rsd455_prim.IsValid():
+                for child in rsd455_prim.GetChildren():
+                    if child.GetTypeName() == "Camera" and "Color" in str(child.GetPath()):
+                        render_path = str(child.GetPath())
+                        break
+        
         self._render_product = rep.create.render_product(
-            self._prim_path,
+            render_path,
             self._resolution,
             force_new=False
         )
@@ -162,17 +184,8 @@ class Camera(Sensor):
                 # Check if data is 3D (height, width, channels)
                 if len(rgb_data.shape) == 3:
                     self.rgb_image.set_value(rgb_data[:, :, :3])
-                else:
-                    print(f"Warning: RGB data has unexpected shape: {rgb_data.shape}")
-                    # Try to reshape if it's 1D
-                    if len(rgb_data.shape) == 1:
-                        # This might be a flattened image, skip for now
-                        print(f"RGB data is 1D with shape {rgb_data.shape}, skipping")
-                        pass
             except Exception as e:
-                print(f"Error processing RGB data: {e}")
-        else:
-            print(f"Warning: RGB annotator is None for camera at {self._prim_path}")
+                pass
         
         if self._segmentation_annotator is not None:
             data = self._segmentation_annotator.get_data()
@@ -370,4 +383,103 @@ class HawkCamera(Sensor):
         if self.single_camera is not None:
             self.single_camera.update_state()
         
+        super().update_state()
+
+
+class RealSenseCamera(Camera):
+    """RealSense D455 camera class for handling Intel RealSense D455 sensor."""
+    
+    usd_url: str = "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac/Sensors/Intel/RealSense/rsd455.usd"
+    resolution: Tuple[int, int] = (848, 480)  # Standard RealSense D455 resolution
+    
+    @classmethod
+    def _fix_physics_hierarchy(cls, prim_path: str):
+        """Fix the physics hierarchy issue by removing RigidBodyAPI from camera prims."""
+        from pxr import UsdPhysics
+        from omni.ext.mobility_gen.utils.global_utils import get_stage
+        from omni.ext.mobility_gen.utils.stage_utils import stage_get_prim
+        
+        stage = get_stage()
+        
+        # Find the camera prim
+        camera_prim = stage_get_prim(stage, prim_path)
+        if not camera_prim.IsValid():
+            print(f"Warning: Camera prim not found at {prim_path}")
+            return
+        
+        # Remove RigidBodyAPI from the camera and its children
+        def remove_rigid_body_api(prim):
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                prim.RemoveAPI(UsdPhysics.RigidBodyAPI)
+                print(f"Removed RigidBodyAPI from {prim.GetPath()}")
+            
+            # Recursively process children
+            for child in prim.GetChildren():
+                remove_rigid_body_api(child)
+        
+        remove_rigid_body_api(camera_prim)
+    
+    @classmethod
+    def build(cls, prim_path: str) -> "RealSenseCamera":
+        """Build a RealSense camera at the specified prim path."""
+        stage = get_stage()
+
+        # Add the USD reference to get the RealSense camera prims
+        stage_add_usd_ref(
+            stage=stage,
+            path=prim_path,
+            usd_path=cls.usd_url
+        )
+
+        # Fix the physics hierarchy issue
+        cls._fix_physics_hierarchy(prim_path)
+
+        return cls.attach(prim_path)
+    
+    @classmethod
+    def attach(cls, prim_path: str) -> "RealSenseCamera":
+        """Attach to an existing RealSense camera at the specified prim path."""
+        
+        # Find the RSD455 camera
+        rgb_path = os.path.join(prim_path, "RSD455")
+        if not stage_get_prim(get_stage(), rgb_path).IsValid():
+            return None
+        
+        # Create camera at RSD455 path with default resolution
+        camera = cls(rgb_path, cls.resolution)
+        
+        # Find the Color camera for RGB data and get its actual resolution
+        stage = get_stage()
+        rsd455_prim = stage_get_prim(stage, rgb_path)
+        if rsd455_prim.IsValid():
+            for child in rsd455_prim.GetChildren():
+                if child.GetTypeName() == "Camera" and "Color" in str(child.GetPath()):
+                    camera._prim_path = str(child.GetPath())
+                    camera._prim = child
+                    
+                    # Update the XForm to use the Color camera path for transform
+                    camera._xform_prim = XFormPrim(str(child.GetPath()))
+                    
+                    # Get the actual resolution from the camera prim
+                    try:
+                        # Try to get resolution from camera attributes
+                        width_attr = child.GetAttribute("width")
+                        height_attr = child.GetAttribute("height")
+                        if width_attr.HasValue() and height_attr.HasValue():
+                            actual_width = width_attr.Get()
+                            actual_height = height_attr.Get()
+                            camera._resolution = (actual_width, actual_height)
+                        else:
+                            # Use default resolution if attributes not found
+                            pass
+                    except:
+                        # Fallback to default resolution
+                        pass
+                    break
+        
+        return camera
+
+    def update_state(self):
+        """Update the state of the RealSense camera."""
+        # Just call the parent Camera's update_state - it has all the buffers we need
         super().update_state()

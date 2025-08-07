@@ -32,7 +32,7 @@ import isaacsim.core.utils.numpy.rotations as rot_utils
 
 # Extension imports
 from omni.ext.mobility_gen.common import Buffer, Module
-from omni.ext.mobility_gen.sensors import Sensor, HawkCamera
+from omni.ext.mobility_gen.sensors import Sensor, HawkCamera, RealSenseCamera
 from omni.ext.mobility_gen.utils.global_utils import get_stage, get_world
 from omni.ext.mobility_gen.utils.stage_utils import stage_get_prim, stage_add_camera, stage_add_usd_ref
 from omni.ext.mobility_gen.utils.prim_utils import prim_rotate_x, prim_rotate_y, prim_rotate_z, prim_translate
@@ -539,7 +539,8 @@ class SpotRobot(IsaacLabRobot):
     front_camera_base_path = "body/front_camera"
     front_camera_rotation = (180, 180, 180)
     front_camera_translation = (0.44, 0.075, 0.01)
-    front_camera_type = HawkCamera
+    front_camera_type = RealSenseCamera
+    # front_camera_type = HawkCamera
 
     keyboard_linear_velocity_gain: float = 1.0
     keyboard_angular_velocity_gain: float = 1.0

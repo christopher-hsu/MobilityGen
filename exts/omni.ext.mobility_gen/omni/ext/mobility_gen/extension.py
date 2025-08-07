@@ -449,8 +449,8 @@ class MobilityGenExtension(omni.ext.IExt):
                         # Publish common state data
                         self.ros2_manager.ros2_writer.write_state_dict_common(state_dict_common, step)
                         
-                        # Publish camera data separately in this thread
-                        self.ros2_manager.ros2_writer.write_common_state_data(full_state_dict, step)
+                        # Publish camera data separately in this thread with scenario access
+                        self.ros2_manager.ros2_writer.write_common_state_data(full_state_dict, step, self.scenario)
                     
                     # Print status every 60 steps (about once per second)
                     if step % 60 == 0:
