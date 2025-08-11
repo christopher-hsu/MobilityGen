@@ -137,6 +137,16 @@ try:
             self.camera_publish_frequency = 10
             self.last_camera_publish_step = -1
             
+            # Performance optimization settings
+            self.enable_queue_monitoring = True
+            self.queue_warning_threshold = 80  # Warn when queue is 80% full
+            self.queue_drop_threshold = 95     # Drop messages when queue is 95% full
+            self.max_camera_fps = 30          # Limit camera publishing to 30 FPS
+            
+            # Disable common state publishing for performance reasons
+            # this is the dict that mobility gen generates for their data recording
+            self.enable_common_state_publishing = False
+            
             # Thread-safe database operations with better queue management
             self.db_queue = queue.Queue(maxsize=1000)  # Limit queue size
             self.db_thread = None
@@ -230,7 +240,8 @@ try:
                 # Process database operations from queue
                 while self.db_running:
                     try:
-                        operation = self.db_queue.get(timeout=0.1)
+                        # Reduced timeout for faster processing
+                        operation = self.db_queue.get(timeout=0.01)  # Reduced from 100ms to 10ms
                         if operation is None:  # Shutdown signal
                             break
                         
@@ -355,9 +366,20 @@ try:
         
         def _init_publishers(self):
             """Initialize ROS2 publishers."""
+            # Import QoS profiles for better performance
+            from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+            
+            # Create a QoS profile optimized for data collection
+            qos_profile = QoSProfile(
+                reliability=ReliabilityPolicy.BEST_EFFORT,  # Allow some message loss for better performance
+                durability=DurabilityPolicy.VOLATILE,       # Don't persist messages
+                history=HistoryPolicy.KEEP_LAST,           # Keep last N messages
+                depth=100                                  # Queue depth
+            )
+            
             # Common state publisher
             self.common_state_pub = self.create_publisher(
-                String, f"{self.namespace}/common_state", 10
+                String, f"{self.namespace}/common_state", qos_profile
             )
             
             # Camera publishers (lazy initialization)
@@ -367,7 +389,10 @@ try:
             self.normals_publishers = {}
             self.camera_info_publishers = {}
             
-            print("✓ Publishers initialized")
+            # Store QoS profile for other publishers
+            self.qos_profile = qos_profile
+            
+            print("✓ Publishers initialized with optimized QoS profiles")
         
         def _sanitize_topic_name(self, name: str) -> str:
             """Sanitize a name for use as a ROS2 topic name."""
@@ -380,7 +405,7 @@ try:
             sanitized_name = self._sanitize_topic_name(camera_name)
             if sanitized_name not in publisher_dict:
                 topic_name = f"{self.namespace}/{topic_suffix}/{sanitized_name}"
-                publisher_dict[sanitized_name] = self.create_publisher(msg_type, topic_name, 10)
+                publisher_dict[sanitized_name] = self.create_publisher(msg_type, topic_name, self.qos_profile)
             return publisher_dict[sanitized_name]
         
         def _create_header(self, frame_id: str = None):
@@ -495,6 +520,12 @@ try:
         def _write_to_bag(self, topic_name: str, msg, msg_type: str):
             """Write a message to the bag file (thread-safe, non-blocking)."""
             try:
+                # Check database queue health before writing
+                queue_size = self.db_queue.qsize()
+                if queue_size > 800:  # Warning when queue is 80% full
+                    step_info = f" (step {getattr(self, 'current_step', 'unknown')})" if hasattr(self, 'current_step') else ""
+                    print(f"WARNING: Database queue is {queue_size}/1000 full{step_info}, consider reducing data rate")
+                
                 topic_id = self._get_or_create_topic_id(topic_name, msg_type)
                 serialized_data = serialize_message(msg)
                 timestamp = int(time.time() * 1e9)  # Nanoseconds
@@ -504,7 +535,9 @@ try:
                     self.db_queue.put_nowait(('write_message', (topic_id, timestamp, serialized_data)))
                     self.total_messages += 1
                 except queue.Full:
-                    print(f"WARNING: ROS2 queue full, dropping data for step")
+                    # Get current step from the extension if available
+                    step_info = f" (step {getattr(self, 'current_step', 'unknown')})" if hasattr(self, 'current_step') else ""
+                    print(f"WARNING: Database queue full, dropping data for step{step_info}")
                     self.dropped_messages += 1
                     
             except Exception as e:
@@ -513,14 +546,36 @@ try:
         
         def _publish_message(self, msg, topic_name: str, msg_type: str, publisher=None):
             """Publish a message to topic and/or bag."""
-            if self.mode in ["Stream Only", "Stream + Bag"] and publisher:
-                publisher.publish(msg)
-            
-            if self.mode in ["Bag Only", "Stream + Bag"] and hasattr(self, 'db_cursor'):
-                self._write_to_bag(topic_name, msg, msg_type)
+            try:
+                if self.mode in ["Stream Only", "Stream + Bag"] and publisher:
+                    # Check if publisher is still valid and monitor queue
+                    if hasattr(publisher, 'get_queue_size') and self.enable_queue_monitoring:
+                        queue_size = publisher.get_queue_size()
+                        if queue_size > self.queue_warning_threshold:
+                            print(f"WARNING: Queue for {topic_name} is {queue_size}/100 full")
+                        if queue_size >= self.queue_drop_threshold:
+                            print(f"ERROR: Queue for {topic_name} is {queue_size}/100 full, dropping message")
+                            return
+                    
+                    publisher.publish(msg)
+                
+                if self.mode in ["Bag Only", "Stream + Bag"] and hasattr(self, 'db_cursor'):
+                    self._write_to_bag(topic_name, msg, msg_type)
+                    
+            except Exception as e:
+                print(f"ERROR: Failed to publish message to {topic_name}: {e}")
+                # Don't let publishing errors crash the system
         
         def write_state_dict_common(self, state_dict: dict, step: int):
             """Write common state data to ROS2 topics and bag."""
+            # Track current step for error reporting
+            self.current_step = step
+            
+            if not self.enable_common_state_publishing:
+                if step % 1000 == 0:
+                    print(f"Skipping common state publishing for step {step} due to flag.")
+                return
+
             msg = String()
             serializable_state = _convert_numpy_to_json(state_dict)
             msg.data = json.dumps({
@@ -535,6 +590,9 @@ try:
         def write_common_state_data(self, state_dict: dict, step: int, scenario=None):
             """Extract and publish all data from state to ROS2 topics."""
             try:
+                # Track current step for error reporting
+                self.current_step = step
+                
                 if self.scenario is None:
                     self.scenario = scenario
                 
@@ -609,6 +667,7 @@ try:
                     self._publish_camera_data_with_images(camera_data, step)
                 self._publish_keyboard_data(keyboard_data, step)
                 
+              
                 self.last_ros2_publish_step = step
                       
             except Exception as e:
@@ -637,7 +696,7 @@ try:
                     
                     topic_name = f"{self.namespace}/robot/pose"
                     if not hasattr(self, 'robot_pose_publisher'):
-                        self.robot_pose_publisher = self.create_publisher(PoseStamped, topic_name, 10)
+                        self.robot_pose_publisher = self.create_publisher(PoseStamped, topic_name, 100)  # Increased from 10 to 100
                     self._publish_message(pose_msg, topic_name, "geometry_msgs/msg/PoseStamped", self.robot_pose_publisher)
                     
                     # Publish robot pose as transform
@@ -656,7 +715,7 @@ try:
                     
                     topic_name = f"{self.namespace}/robot/twist"
                     if not hasattr(self, 'robot_twist_publisher'):
-                        self.robot_twist_publisher = self.create_publisher(TwistStamped, topic_name, 10)
+                        self.robot_twist_publisher = self.create_publisher(TwistStamped, topic_name, 100)  # Increased from 10 to 100
                     self._publish_message(twist_msg, topic_name, "geometry_msgs/msg/TwistStamped", self.robot_twist_publisher)
                 
                 # Publish joint data
@@ -814,7 +873,7 @@ try:
                                 
                                 if topic_name not in self.camera_info_publishers:
                                     self.camera_info_publishers[topic_name] = self.create_publisher(
-                                        CameraInfo, topic_name, 10
+                                        CameraInfo, topic_name, 100  # Increased from 10 to 100
                                     )
                                 self._publish_message(camera_info_msg, topic_name, "sensor_msgs/msg/CameraInfo", 
                                                     self.camera_info_publishers[topic_name])
@@ -993,16 +1052,13 @@ try:
             except Exception as e:
                 print(f"Error extracting intrinsics for camera {camera_name}: {e}")
                 return None
+    
         
-        def get_queue_stats(self):
-            """Get queue statistics for monitoring."""
-            return {
-                'queue_size': self.db_queue.qsize(),
-                'max_queue_size': self.db_queue.maxsize,
-                'dropped_messages': self.dropped_messages,
-                'total_messages': self.total_messages,
-                'drop_rate': self.dropped_messages / max(self.total_messages, 1) * 100
-            }
+        def set_common_state_publishing(self, enable: bool):
+            """Enable or disable common state publishing for performance testing."""
+            self.enable_common_state_publishing = enable
+            status = "enabled" if enable else "disabled"
+            print(f"Common state publishing {status}")
         
         def destroy_node(self):
             """Clean up the node and database."""
@@ -1133,3 +1189,10 @@ class ROS2Manager:
             except Exception as e:
                 print(f"Error writing camera data to ROS2: {e}")
                 traceback.print_exc() 
+    
+    def set_common_state_publishing(self, enable: bool):
+        """Enable or disable common state publishing for performance testing."""
+        if self.ros2_writer is not None:
+            self.ros2_writer.set_common_state_publishing(enable)
+        else:
+            print("No ROS2 writer available") 
