@@ -171,6 +171,13 @@ This assumes you see the MobilityGen extension window.
 
     ```
     http://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.2/Isaac/Environments/Simple_Warehouse/warehouse_multiple_shelves.usd
+    /data/scenes/mobility_gen_warehouse.usda
+
+    https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac/Environments/Simple_Warehouse/full_warehouse.usd
+    /data/scenes/full_warehouse.usd
+
+    https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/4.5/Isaac/Environments/Hospital/hospital.usd
+
     ```
 
 2. Under the ``Scenario`` dropdown select ``KeyboardTeleoperationScenario`` to start
