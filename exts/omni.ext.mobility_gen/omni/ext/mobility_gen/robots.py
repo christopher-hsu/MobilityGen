@@ -487,7 +487,8 @@ class H1Robot(IsaacLabRobot):
     front_camera_base_path = "d435_left_imager_link/front_camera/front"
     front_camera_rotation = (0., 250., 90.)
     front_camera_translation = (-0.06, 0., 0.)
-    front_camera_type = HawkCamera
+    # front_camera_type = HawkCamera
+    front_camera_type = RealSenseCamera
 
     keyboard_linear_velocity_gain: float = 1.0
     keyboard_angular_velocity_gain: float = 1.0
