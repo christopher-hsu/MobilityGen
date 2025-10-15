@@ -19,7 +19,7 @@ We added ros2 functionality and semantic task navigation via LLM.
 
 Feed in the USD as context to the LLM and have it output waypoints. Use MobilityGen to navigate to waypoints.
 
-For ROS2 support, sensors (RGB, Depth, tf tree) are streamed out from Isaac Sim via ROS2. We combined this functionality with [Clio](https://arxiv.org/abs/2404.13696) to build scene graphs in Isaac Sim.
+For ROS2 support, sensors (RGB, Depth, tf tree) are streamed out from Isaac Sim via ROS2. We combined this functionality with [Clio](https://arxiv.org/abs/2404.13696) to build meshes and scene graphs in Isaac Sim.
 
 See our fork with [Clio-Eval](https://github.com/christopher-hsu/Clio-Eval)
 
